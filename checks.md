@@ -31,3 +31,6 @@ cargo test -p grepzilla_segment
 # отдельно
 cargo test -p grepzilla_segment manifest
 cargo test -p grepzilla_segment manifest_store
+
+B3
+cargo test -p grepzilla_segment cursor

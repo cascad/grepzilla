@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 pub mod manifest;       
 pub mod manifest_store;  
+pub mod cursor;
 
 /// Внешняя модель документа при ingest
 #[derive(Debug, Clone, Serialize, Deserialize)]
