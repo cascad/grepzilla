@@ -25,3 +25,9 @@ cargo build --release
 ./target/release/gzctl search-seg --seg segments/000002 --q "*игра*" --field text.body --debug-metrics
 ./target/release/gzctl search-seg --seg segments/000002 --q "*играет*" --debug-metrics
 
+B1
+# все тесты бахнуть
+cargo test -p grepzilla_segment
+# отдельно
+cargo test -p grepzilla_segment manifest
+cargo test -p grepzilla_segment manifest_store

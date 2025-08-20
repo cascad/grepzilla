@@ -6,6 +6,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod manifest;       
+pub mod manifest_store;  
+
 /// Внешняя модель документа при ingest
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputDoc(serde_json::Value);
