@@ -8,3 +8,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 grepzilla_segment = { path = "../grepzilla_segment" }
 regex = "1"
+serde_json = "1"

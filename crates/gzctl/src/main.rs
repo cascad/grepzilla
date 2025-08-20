@@ -5,6 +5,8 @@ use grepzilla_segment::gram::{BooleanOp, required_grams_from_wildcard};
 use grepzilla_segment::segjson::{JsonSegmentReader, JsonSegmentWriter};
 use grepzilla_segment::{SegmentReader, SegmentWriter};
 use regex::Regex;
+use std::collections::HashMap;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(version, about = "Grepzilla control: build/search SegmentV1 (JSON)")]
@@ -34,6 +36,7 @@ enum Cmd {
         limit: usize,
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        /// Включить расширенные метрики (печатаются в stderr JSON-ом)
         #[arg(long, default_value_t = false)]
         debug_metrics: bool,
     },
@@ -54,6 +57,8 @@ fn main() -> Result<()> {
             offset,
             debug_metrics,
         } => {
+            let start = Instant::now();
+
             let reader = JsonSegmentReader::open_segment(&seg)?;
             let grams = required_grams_from_wildcard(&q)?;
             let bm = reader.prefilter(BooleanOp::And, &grams, field.as_deref())?;
@@ -63,9 +68,13 @@ fn main() -> Result<()> {
             let mut skipped = 0usize;
             let mut candidates = 0usize;
             let mut verified = 0usize;
+            let mut by_field: HashMap<String, usize> = HashMap::new();
+            let mut scanned_docs = 0usize;
 
             for doc_id in bm.iter() {
                 candidates += 1;
+                scanned_docs += 1;
+
                 if skipped < offset {
                     skipped += 1;
                     continue;
@@ -75,37 +84,79 @@ fn main() -> Result<()> {
                 }
 
                 if let Some(doc) = reader.get_doc(doc_id) {
-                    // Выбираем текст для превью: сначала text.body, затем text.title, иначе любое первое строковое поле
-                    let (field_name, text) = pick_preview_field(doc, field.as_deref());
-
-                    // Проверяем совпадение в нужном поле (если field задан) иначе в любом
-                    let matched = match field.as_deref() {
-                        Some(f) => doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false),
-                        None => doc.fields.values().any(|t| rx.is_match(t)),
+                    // Проверяем совпадение: либо конкретное поле, либо первое подходящее
+                    let (matched, matched_field) = match field.as_deref() {
+                        Some(f) => {
+                            let ok = doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false);
+                            (ok, ok.then(|| f.to_string()))
+                        }
+                        None => {
+                            if let Some((k, _)) = doc.fields.iter().find(|(_, t)| rx.is_match(t)) {
+                                (true, Some(k.clone()))
+                            } else {
+                                (false, None)
+                            }
+                        }
                     };
                     if !matched {
                         continue;
                     }
                     verified += 1;
 
-                    // Строим сниппет с подсветкой первой найденной области
+                    // Выбираем текст для превью (приоритет: field -> text.body -> text.title -> любое)
+                    let (preview_field, text) = pick_preview_field(doc, field.as_deref());
+
+                    // Сниппет с подсветкой первой матч-зоны
                     let preview = build_snippet(&rx, &text, 80);
+
+                    // Имя поля для статистики: именно где матч нашёлся, иначе превью-поле
+                    let stat_field = matched_field
+                        .as_deref()
+                        .unwrap_or_else(|| preview_field.unwrap_or("-"));
+                    *by_field.entry(stat_field.to_string()).or_insert(0) += 1;
 
                     println!(
                         "{}\t{}\t{}: {}",
                         doc.ext_id,
                         doc_id,
-                        field_name.unwrap_or("-"),
+                        preview_field.unwrap_or("-"),
                         preview
                     );
                     shown += 1;
                 }
             }
+
             if debug_metrics {
-                eprintln!(
-                    "candidates_total={} verified_total={} hits_total={}",
-                    candidates, verified, shown
-                );
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                // Дополнительные вычисляемые метрики
+                let ratio_verified = if candidates > 0 {
+                    (verified as f64) / (candidates as f64)
+                } else {
+                    0.0
+                };
+                let ratio_hits = if verified > 0 {
+                    (shown as f64) / (verified as f64)
+                } else {
+                    0.0
+                };
+
+                let metrics = serde_json::json!({
+                    "segment_path": seg,
+                    "query": q,
+                    "field_filter": field,
+                    "elapsed_ms": elapsed_ms,
+                    "doc_count": reader.doc_count(),
+                    "scanned_docs": scanned_docs,     // сколько doc_id прошли через цикл (по bitmap)
+                    "candidates_total": candidates,   // кандидаты префильтра (равно scanned_docs в данном цикле)
+                    "verified_total": verified,       // прошли regex
+                    "hits_total": shown,              // выданы пользователю (limit/offset учтены)
+                    "ratios": {
+                        "prefilter_to_verify": ratio_verified,
+                        "verify_to_hits": ratio_hits,
+                    },
+                    "by_field": by_field,             // распределение по полям, где зафиксирован матч
+                });
+                eprintln!("{}", serde_json::to_string_pretty(&metrics)?);
             }
         }
     }
@@ -160,7 +211,7 @@ fn build_snippet(rx: &Regex, text: &str, window: usize) -> String {
         let end = m.end();
 
         // Контекст по бокам
-        let ctx = window.saturating_sub((end - start).min(window) + 2) / 2; // «… » и « …»
+        let ctx = window.saturating_sub((end - start).min(window) + 2) / 2; // на «…» по краям
         let from = start.saturating_sub(ctx);
         let to = (end + ctx).min(text.len());
 

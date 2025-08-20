@@ -200,6 +200,7 @@ dependencies = [
  "clap",
  "grepzilla_segment",
  "regex",
+ "serde_json",
 ]
 
 [[package]]

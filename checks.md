@@ -15,3 +15,13 @@ A3
 cargo build --release
 ./target/release/gzctl search-seg --seg segments/000002 --q "*игра*" --field text.body
 ./target/release/gzctl search-seg --seg segments/000002 --q "*играет*"
+
+A4
+cargo build --release
+
+# Сегмент из A2 уже есть (segments/000002). Иначе пересобери:
+# ./target/release/gzctl build-seg --input examples/data.jsonl --out segments/000002
+
+./target/release/gzctl search-seg --seg segments/000002 --q "*игра*" --field text.body --debug-metrics
+./target/release/gzctl search-seg --seg segments/000002 --q "*играет*" --debug-metrics
+
