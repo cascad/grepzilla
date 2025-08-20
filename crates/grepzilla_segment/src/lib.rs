@@ -35,7 +35,7 @@ pub trait SegmentReader {
     fn open_segment(path: &str) -> Result<Self> where Self: Sized;
     fn doc_count(&self) -> u32;
     /// Вернуть кандидатов по обязательным 3-граммам с учётом логики AND/OR/NOT.
-    fn prefilter(&self, op: gram::BooleanOp, grams: &[String]) -> Result<croaring::Bitmap>;
+    fn prefilter(&self, op: gram::BooleanOp, grams: &[String], field: Option<&str>) -> anyhow::Result<croaring::Bitmap>;
     /// Вытащить документ
     fn get_doc(&self, doc_id: u32) -> Option<&StoredDoc>;
 }

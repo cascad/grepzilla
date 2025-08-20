@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use grepzilla_segment::gram::{required_grams_from_wildcard, BooleanOp};
+use grepzilla_segment::gram::{BooleanOp, required_grams_from_wildcard};
 use grepzilla_segment::segjson::{JsonSegmentReader, JsonSegmentWriter};
 use grepzilla_segment::{SegmentReader, SegmentWriter};
 use regex::Regex;
@@ -16,30 +16,25 @@ struct Cli {
 enum Cmd {
     /// Построить сегмент из JSONL
     BuildSeg {
-        /// Путь к JSONL с документами
         #[arg(long)]
         input: String,
-        /// Папка для сегмента (будет создана)
         #[arg(long)]
         out: String,
     },
     /// Поиск в одном сегменте (wildcard-паттерн)
     SearchSeg {
-        /// Папка сегмента
         #[arg(long)]
         seg: String,
-        /// Шаблон (wildcard: * и ?) — например, "*играет*"
         #[arg(long)]
         q: String,
-        /// Field scope (например, text.body)
         #[arg(long)]
         field: Option<String>,
-        /// Лимит на выдачу
         #[arg(long, default_value_t = 10)]
         limit: usize,
-        /// Смещение
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        #[arg(long, default_value_t = false)]
+        debug_metrics: bool,
     },
 }
 
@@ -56,18 +51,18 @@ fn main() -> Result<()> {
             field,
             limit,
             offset,
+            debug_metrics,
         } => {
             let reader = JsonSegmentReader::open_segment(&seg)?;
             let grams = required_grams_from_wildcard(&q)?;
-            let bm = reader.prefilter(BooleanOp::And, &grams)?;
-
-            // Компилируем wildcard в regex
+            let bm = reader.prefilter(BooleanOp::And, &grams, field.as_deref())?;
             let rx = wildcard_to_regex(&q)?;
-
-            // Пагинация по doc_id возрастанию
             let mut shown = 0usize;
             let mut skipped = 0usize;
+            let mut candidates = 0usize;
+            let mut verified = 0usize;
             for doc_id in bm.iter() {
+                candidates += 1;
                 if skipped < offset {
                     skipped += 1;
                     continue;
@@ -76,7 +71,6 @@ fn main() -> Result<()> {
                     break;
                 }
                 if let Some(doc) = reader.get_doc(doc_id) {
-                    // Проверка по полю/всем полям
                     let matched = match field.as_deref() {
                         Some(f) => doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false),
                         None => doc.fields.values().any(|t| rx.is_match(t)),
@@ -84,6 +78,7 @@ fn main() -> Result<()> {
                     if !matched {
                         continue;
                     }
+                    verified += 1;
                     let preview = doc
                         .fields
                         .get("text.body")
@@ -93,6 +88,12 @@ fn main() -> Result<()> {
                     println!("{}\t{}\t{}", doc.ext_id, doc_id, preview);
                     shown += 1;
                 }
+            }
+            if debug_metrics {
+                eprintln!(
+                    "candidates_total={} verified_total={} hits_total={}",
+                    candidates, verified, shown
+                );
             }
         }
     }

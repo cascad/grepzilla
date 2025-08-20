@@ -11,6 +11,14 @@ fn strip_accents(s: &str) -> String {
 }
 
 fn is_mark(c: char) -> bool {
-    // Упрощённый детектор комбинирующих знаков — достаточно для MVP
     ('\u{0300}'..='\u{036F}').contains(&c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_normalize_basic() {
+        assert_eq!(normalize("КоШКи"), "кошки");
+    }
 }
