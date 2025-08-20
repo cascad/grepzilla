@@ -10,3 +10,8 @@ cargo test --workspace
 ./target/release/gzctl build-seg --input examples/data.jsonl --out segments/000002
 ./target/release/gzctl search-seg --seg segments/000002 --q "*игра*" --debug-metrics
 ./target/release/gzctl search-seg --seg segments/000002 --q "*игра*" --field text.body --debug-metrics
+
+A3
+cargo build --release
+./target/release/gzctl search-seg --seg segments/000002 --q "*игра*" --field text.body
+./target/release/gzctl search-seg --seg segments/000002 --q "*играет*"
