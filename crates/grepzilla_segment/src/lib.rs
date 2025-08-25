@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 pub mod manifest;       
 pub mod manifest_store;  
 pub mod cursor;
+pub mod search;
 
 /// Внешняя модель документа при ingest
 #[derive(Debug, Clone, Serialize, Deserialize)]

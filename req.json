@@ -1,0 +1,10 @@
+{
+  "wildcard": "*игра*",
+  "field": "text.body",
+  "segments": [
+    "D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000001",
+    "D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000002"
+  ],
+  "page": { "size": 10, "cursor": null },
+  "limits": { "parallelism": 4, "deadline_ms": 1000, "max_candidates": 200000 }
+}

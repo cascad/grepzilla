@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    // === Debug executable 'broker' (как у lab) ===
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'broker'",
+      "cargo": {
+        "args": ["build", "--bin=broker", "--package=broker"],
+        "filter": { "name": "broker", "kind": "bin" }
+      },
+      "args": [],                 // сюда можно добавить аргументы для broker, если нужны
+      "cwd": "${workspaceFolder}",
+      "env": { "RUST_LOG": "broker=debug,grepzilla_segment=debug" },
+      "console": "integratedTerminal",
+      "stopOnEntry": false,
+      "sourceLanguages": ["rust"]
+    },
+
+    // === Debug executable 'gzctl' (с аргументами) ===
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'gzctl' (search-seg)",
+      "cargo": {
+        "args": ["build", "--bin=gzctl", "--package=gzctl"],
+        "filter": { "name": "gzctl", "kind": "bin" }
+      },
+      "args": [
+        "search-seg",
+        "--seg", "segments/000001",
+        "--q", "*игра*",
+        "--field", "text.body"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "sourceLanguages": ["rust"]
+    }
+  ]
+}

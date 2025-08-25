@@ -101,3 +101,52 @@ curl -Method POST http://localhost:8080/search `
 cargo run -p gzctl -- search-seg --seg segments\000002 --q "*игра*" --field text.body --debug-metrics
 
 ---------
+
+B5
+
+# собрать всё
+cargo build --release --workspace
+
+# запустить брокер (HTTP /search и /ingest/batch)
+cargo run -p broker
+
+--------
+
+# поиск параллельно
+
+curl -s -X POST http://localhost:8080/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "wildcard":"*игра*",
+    "field":"text.body",
+    "segments":["segments/000001","segments/000002","segments/000003"],
+    "page":{"size":50,"cursor":null},
+    "limits":{"parallelism":4,"deadline_ms":800,"max_candidates":200000}
+  }' | jq .
+
+
+----------
+
+#  Ингест батчем → WAL → сегмент
+
+curl -s -X POST http://localhost:8080/ingest/batch \
+-H 'Content-Type: application/json' \
+-d '{"records":[{"id":1,"text":{"body":"foo"}},{"id":2,"text":{"body":"игра"}}]}'
+
+
+Что остаётся “to wire”
+
+Подключить реальную функцию поиска по одному сегменту вместо заглушки storage_adapter::search_one_segment. Там должен быть:
+индекс → кандидаты (чанками) → regex-match (первый hit early-return) → учёт max_candidates.
+
+Привинтить HTTP-роутер (axum/actix) к SearchCoordinator::handle и ingest::handle_batch_json.
+
+В executor проставить time_to_first_hit_ms (фиксируем Instant и первый прихода hit).
+
+В reader дописать стрим-итератор с mmap (сейчас — каркас).
+
+Если хочешь, в следующем шаге я:
+
+Вырежу заглушки и подключу твой реальный поиск по сегменту (покажи мне сигнатуру функции, которая сейчас ищет по одному сегменту).
+
+Сразу добавлю роуты на axum и минимальные метрики Prometheus.
