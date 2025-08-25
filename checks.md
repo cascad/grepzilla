@@ -34,3 +34,70 @@ cargo test -p grepzilla_segment manifest_store
 
 B3
 cargo test -p grepzilla_segment cursor
+
+-------------
+
+B4
+
+4) Как прогнать
+
+Собрать и запустить:
+
+cargo run -p broker
+
+Сделать сегмент (если ещё не сделали A2):
+
+./target/release/gzctl build-seg --input examples/data.jsonl --out segments/000002
+
+Запрос (с одним сегментом):
+
+curl -s -X POST http://localhost:8080/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "wildcard": "*игра*",
+    "field": "text.body",
+    "segments": ["segments/000002"],
+    "page": { "size": 2, "cursor": null }
+  }' | jq .
+
+Повтор (следующая страница) — подставь cursor из ответа:
+
+curl -s -X POST http://localhost:8080/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "wildcard": "*игра*",
+    "field": "text.body",
+    "segments": ["segments/000002"],
+    "page": { "size": 2, "cursor": { ... } }
+  }' | jq .
+
+На этом этапе курсор фиксирует позицию по каждому сегменту (через ShardPos.last_docid). Поле pin_gen есть, но мы его не используем до внедрения настоящих manifest_ptr/manifest.json. Когда перейдём к etcd — брокер начнёт пинить gen и получать состав сегментов по шартам.
+
+
+cargo run -p broker
+# в другом окне:
+./target/release/gzctl build-seg --input examples/data.jsonl --out segments/000002
+curl -s -X POST http://localhost:8080/search -H 'Content-Type: application/json' -d '{"wildcard":"*игра*","field":"text.body","segments":["segments/000002"],"page":{"size":2,"cursor":null}}' | jq .
+
+--------
+
+# собрать все в релизе
+cargo build --release --workspace
+# собрать конкретный бинарь
+cargo build --release -p gzctl
+
+# запуск
+.\target\release\broker.exe
+.\target\release\gzctl.exe build-seg --input examples\data.jsonl --out segments\000002
+
+curl -Method POST http://localhost:8080/search `
+  -ContentType 'application/json' `
+  -Body '{"wildcard":"*игра*","field":"text.body","segments":["segments/000002"],"page":{"size":2,"cursor":null}}'
+
+---------
+
+# Убедимся, что сегмент реально ищется с CLI
+# Должны быть хиты и метрики (candidates_total > 0). Если тут пусто — дело в сегменте, а не в брокере.
+cargo run -p gzctl -- search-seg --seg segments\000002 --q "*игра*" --field text.body --debug-metrics
+
+---------

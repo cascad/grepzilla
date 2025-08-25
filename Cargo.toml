@@ -2,5 +2,13 @@
 members = [
   "crates/grepzilla_segment",
   "crates/gzctl",
+  "crates/broker",
 ]
 resolver = "2"
+
+[profile.release]
+opt-level = "z"         # или "s" для размера, "3" для максимальной скорости
+lto = "fat"             # лучшее сжатие/скорость, дольше сборка
+codegen-units = 1       # лучше оптимизация, дольше сборка
+strip = "symbols"       # убрать символы (уменьшит размер)
+panic = "abort"         # если ок без unwinding
