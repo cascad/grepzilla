@@ -1,20 +1,23 @@
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 pub type ShardId = u64;
 pub type GenId = u64;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageIn {
     pub size: usize,
     /// Произвольный JSON: { per_seg: { "<seg_path>": { last_docid: n } }, pin_gen: { "<shard>": gen } }
     pub cursor: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SearchLimits {
+    #[serde(default)]
     pub parallelism: Option<usize>,
+    #[serde(default)]
     pub deadline_ms: Option<u64>,
+    #[serde(default)]
     pub max_candidates: Option<u64>,
 }
 
@@ -30,23 +33,30 @@ pub struct PageReq {
     pub cursor: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SearchRequest {
     pub wildcard: String,
-    /// Если у тебя Optional — поменяй на Option<String>
-    pub field: String,
-    /// RAW-режим (напрямую пути сегментов)
-    pub segments: Vec<String>,
-    /// B6-режим через манифест (по шардам). Можно не передавать.
-    pub shards: Option<Vec<ShardId>>,
+    #[serde(default)]
+    pub field: Option<String>, // ← опционально
+    #[serde(default)]
+    pub segments: Vec<String>, // ← для B5: можно слать напрямую
+    #[serde(default)]
+    pub shards: Option<Vec<u64>>, // ← для B6: выбираем сегменты по шардам
     pub page: PageIn,
+    #[serde(default)]
     pub limits: Option<SearchLimits>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PerSegPos {
+    pub last_docid: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Cursor {
-    pub per_seg: serde_json::Map<String, serde_json::Value>,
-    pub pin_gen: Option<std::collections::HashMap<ShardId, GenId>>,
+    pub per_seg: HashMap<String, PerSegPos>,
+    #[serde(default)]
+    pub pin_gen: Option<HashMap<u64, u64>>, // ← B6: gen по шардам
 }
 
 // --- ВЫХОД ---

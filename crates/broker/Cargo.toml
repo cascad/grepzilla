@@ -16,6 +16,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 nanoid = "0.4"
 futures = "0.3"
 regex = "1.10"
+async-trait = "0.1"
 
 grepzilla_segment = { path = "../grepzilla_segment" }
 

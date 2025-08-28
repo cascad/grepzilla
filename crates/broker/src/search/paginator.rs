@@ -1,33 +1,42 @@
-use crate::search::types::*;
-use serde_json::json;
+use std::collections::HashMap;
+
+use crate::search::{executor::SegmentTaskOutput, types::*};
 
 pub struct Paginator;
 
 impl Paginator {
-    pub fn merge(
-        mut parts: Vec<crate::search::executor::SegmentTaskOutput>,
-        page_size: usize,
-    ) -> (Vec<Hit>, Cursor, u64) {
-        // Наивный мердж: просто конкат, затем truncate
-        parts.sort_by(|a, b| a.seg_path.cmp(&b.seg_path)); // стабильно
-        let mut hits = Vec::new();
-        let mut candidates_total = 0u64;
-        let mut per_seg = serde_json::Map::new();
+    pub fn merge(mut parts: Vec<SegmentTaskOutput>, page_size: usize) -> (Vec<Hit>, Cursor, u64) {
+        // Если у тебя уже есть сортировка/слияние — оставь её; ниже — простая версия.
+        let mut hits: Vec<Hit> = Vec::new();
+        let mut per_seg: HashMap<String, PerSegPos> = HashMap::new();
+        let mut candidates_total: u64 = 0;
 
-        for part in parts {
-            candidates_total += part.candidates;
-            let remain = page_size.saturating_sub(hits.len());
-            if remain > 0 {
-                let take = part.hits.into_iter().take(remain);
-                hits.extend(take);
+        // суммируем метрику
+        for p in &parts {
+            candidates_total += p.candidates as u64;
+        }
+
+        // набираем первую страницу и сохраняем last_docid per-seg
+        for p in parts.into_iter() {
+            for h in p.hits {
+                if hits.len() >= page_size {
+                    break;
+                }
+                hits.push(h);
             }
-            per_seg.insert(part.seg_path, json!({ "last_docid": part.last_docid }));
+            per_seg.insert(
+                p.seg_path.clone(),
+                PerSegPos {
+                    last_docid: p.last_docid.unwrap_or(0),
+                },
+            );
         }
 
         let cursor = Cursor {
-            per_seg: per_seg,
-            pin_gen: None,
+            per_seg,
+            pin_gen: None, // B6: координатор заполнит, если есть manifest
         };
+
         (hits, cursor, candidates_total)
     }
 }

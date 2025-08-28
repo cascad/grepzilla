@@ -19,6 +19,13 @@ pub struct FsManifestStore {
     pub path: std::path::PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct SegRef {
+    pub shard: u64,
+    pub gen: u64,
+    pub path: String,
+}
+
 #[async_trait]
 impl ManifestStore for FsManifestStore {
     async fn current(&self) -> anyhow::Result<HashMap<ShardId, GenId>> {
