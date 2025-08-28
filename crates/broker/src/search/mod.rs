@@ -1,27 +1,36 @@
-// broker/src/search/mod.rs
-pub mod executor;
-pub mod paginator;
-pub mod types;
-
 use crate::search::executor::{ParallelExecutor, SegmentTaskInput, SegmentTaskOutput};
+use crate::search::manifest::FsManifestStore;
 use crate::search::paginator::Paginator;
+use crate::search::selector::SegmentSelector;
 use crate::search::types::*;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+pub mod executor;
+pub mod manifest;
+pub mod paginator;
+pub mod selector;
+pub mod snippet;
+pub mod types;
 
 pub struct SearchCoordinator {
     default_parallelism: usize,
+    manifest: Arc<FsManifestStore>,
 }
 
 impl SearchCoordinator {
     pub fn new(default_parallelism: usize) -> Self {
         Self {
             default_parallelism,
+            manifest: Arc::new(FsManifestStore {
+                path: "manifest.json".into(),
+            }),
         }
     }
 
     pub async fn handle(&self, req: SearchRequest) -> anyhow::Result<SearchResponse> {
-        // старт для метрики TTFH
-        let start_instant = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
         let limits = req.limits.clone().unwrap_or(SearchLimits {
             parallelism: None,
@@ -34,9 +43,15 @@ impl SearchCoordinator {
             .max(1);
         let executor = ParallelExecutor::new(parallelism);
 
-        // Собираем задачи по сегментам
-        let tasks = req
-            .segments
+        // --- B6: выбор сегментов ---
+        let selector = SegmentSelector {
+            store: self.manifest.clone(),
+        };
+        let pinned_in = extract_pin_gen(&req.page.cursor);
+        let (selected_segments, pin_gen) = selector.plan(&req, pinned_in).await?;
+
+        // Сборка задач
+        let tasks = selected_segments
             .iter()
             .map(|seg| SegmentTaskInput {
                 seg_path: seg.clone(),
@@ -50,7 +65,6 @@ impl SearchCoordinator {
         let ct = CancellationToken::new();
         let deadline = limits.deadline();
 
-        // Поиск по одному сегменту — реальный вызов адаптера
         let search_fn = |input: SegmentTaskInput, ctok: CancellationToken| async move {
             let out = crate::storage_adapter::search_one_segment(input, ctok).await?;
             Ok::<SegmentTaskOutput, anyhow::Error>(out)
@@ -60,26 +74,27 @@ impl SearchCoordinator {
             .run_all(ct.clone(), tasks, search_fn, req.page.size, deadline)
             .await;
 
-        let (hits, cursor, candidates_total) = Paginator::merge(parts, req.page.size);
+        let (hits, mut cursor, candidates_total) = Paginator::merge(parts, req.page.size);
 
-        // простая оценка time-to-first-hit: если есть хоть один хит — берем общее elapsed
-        let time_to_first_hit_ms: u128 = if !hits.is_empty() {
-            start_instant.elapsed().as_millis()
-        } else {
+        // Вставляем pinned gen’ы в курсор
+        cursor.pin_gen = Some(pin_gen);
+
+        let ttfh = if hits.is_empty() {
             0
+        } else {
+            start.elapsed().as_millis() as u64
         };
 
-        let resp = SearchResponse {
+        Ok(SearchResponse {
             hits,
             cursor: Some(cursor),
             metrics: SearchMetrics {
                 candidates_total,
-                time_to_first_hit_ms: time_to_first_hit_ms as u64, // если тип u64/u128 — подгони
+                time_to_first_hit_ms: ttfh,
                 deadline_hit,
                 saturated_sem,
             },
-        };
-        Ok(resp)
+        })
     }
 }
 
@@ -90,4 +105,29 @@ fn extract_last_docid(cursor: &Option<serde_json::Value>, seg: &str) -> Option<u
         .and_then(|ps| ps.get(seg))
         .and_then(|s| s.get("last_docid"))
         .and_then(|v| v.as_u64())
+}
+
+// fn extract_pin_gen(cursor: &Option<serde_json::Value>) -> Option<std::collections::HashMap<u64,u64>> {
+//     let m = cursor.as_ref()?.get("pin_gen")?.as_object()?;
+//     Some(
+//         m.iter()
+//             .filter_map(|(k, v)| {
+//                 let shard = k.parse::<u64>().ok()?;
+//                 let gen = v.as_u64()?;
+//                 Some((shard, gen))
+//             })
+//             .collect()
+//     )
+// }
+
+fn extract_pin_gen(cursor: &Option<serde_json::Value>) -> Option<HashMap<u64, u64>> {
+    let obj = cursor.as_ref()?.get("pin_gen")?.as_object()?;
+
+    let mut out = HashMap::new();
+    for (k, v) in obj {
+        if let (Ok(shard), Some(gen)) = (k.parse::<u64>(), v.as_u64()) {
+            out.insert(shard, gen);
+        }
+    }
+    Some(out)
 }

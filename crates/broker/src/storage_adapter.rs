@@ -1,9 +1,10 @@
-// crates/broker/src/storage_adapter.rs
 use grepzilla_segment::SegmentReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::search::executor::{SegmentTaskInput, SegmentTaskOutput};
+use crate::search::snippet::build_snippet;
+use crate::search::types::Hit;
 
 use regex::Regex;
 
@@ -116,7 +117,7 @@ pub async fn search_one_segment(
 
     // 5) перебор кандидатов с уважением курсора и лимита кандидатов
     let max_candidates = input.max_candidates;
-    let mut hits: Vec<serde_json::Value> = Vec::new();
+    let mut hits: Vec<Hit> = Vec::new();
     let mut candidates_seen: u64 = 0;
     let mut last_docid: Option<u64> = input.cursor_docid;
 
@@ -149,12 +150,24 @@ pub async fn search_one_segment(
                 doc.fields.values().any(|v| re.is_match(v))
             };
 
+            // выберем источник текста для сниппета
+            let text_str = doc
+                .fields
+                .get("text.body")
+                .or_else(|| doc.fields.get("text.title"))
+                .cloned() // скопировать String из BTreeMap
+                .unwrap_or_default(); // если ничего нет — пустая строка
+
+            // построим подсветку по уже скомпилированному regex'у (назовём его re)
+            let preview_str = build_snippet(&re, &text_str, 80);
+
             if matched {
-                hits.push(serde_json::json!({
-                    "ext_id": doc.ext_id,
-                    "doc_id": doc.doc_id,
-                    "matched_field": field_opt,
-                }));
+                hits.push(Hit {
+                    doc_id: doc.doc_id,
+                    ext_id: doc.ext_id.clone(),
+                    preview: Some(preview_str),
+                    matched_field: field_opt.map(str::to_owned),
+                });
             }
         }
     }

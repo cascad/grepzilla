@@ -1,11 +1,10 @@
 use anyhow::Result;
 use regex::Regex;
 
-use crate::gram::{required_grams_from_wildcard, BooleanOp};
+use crate::SegmentReader;
+use crate::gram::{BooleanOp, required_grams_from_wildcard};
 use crate::normalizer::normalize;
 use crate::segjson::JsonSegmentReader;
-use crate::SegmentReader;
-use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub struct Hit {
@@ -27,7 +26,7 @@ fn wildcard_norm_to_regex(norm_wildcard: &str) -> Result<Regex> {
         match ch {
             '*' => pat.push_str(".*"),
             '?' => pat.push('.'),
-            _   => regex::escape(&ch.to_string()).push_str(&mut pat),
+            _ => regex::escape(&ch.to_string()).push_str(&mut pat),
         }
     }
     Ok(Regex::new(&pat)?)
@@ -53,11 +52,15 @@ pub fn search_one_segment(
 
     for doc_id in bm.iter() {
         if let Some(cur) = from_doc {
-            if doc_id as u64 <= cur { continue; }
+            if doc_id as u64 <= cur {
+                continue;
+            }
         }
         candidates += 1;
         last_docid = Some(doc_id as u64);
-        if candidates > max_candidates { break; }
+        if candidates > max_candidates {
+            break;
+        }
 
         if let Some(doc) = reader.get_doc(doc_id) {
             let matched = if let Some(f) = field {
@@ -65,15 +68,20 @@ pub fn search_one_segment(
             } else {
                 doc.fields.values().any(|v| re.is_match(v))
             };
+
             if matched {
                 hits.push(Hit {
                     doc_id,
                     ext_id: doc.ext_id.clone(),
-                    matched_field: field.map(|s| s.to_string()),
+                    matched_field: field.map(str::to_owned),
                 });
             }
         }
     }
 
-    Ok(SegSearchOut { hits, last_docid, candidates })
+    Ok(SegSearchOut {
+        hits,
+        last_docid,
+        candidates,
+    })
 }

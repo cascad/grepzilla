@@ -1,9 +1,11 @@
 // broker/src/search/executor.rs
+use futures::StreamExt;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
-use std::sync::Arc;
-use std::time::{Instant, Duration};
-use futures::StreamExt;
+
+use crate::search::types::Hit;
 
 #[derive(Debug)]
 pub struct SegmentTaskInput {
@@ -16,7 +18,7 @@ pub struct SegmentTaskInput {
 
 pub struct SegmentTaskOutput {
     pub seg_path: String,
-    pub hits: Vec<serde_json::Value>,
+    pub hits: Vec<Hit>,
     pub last_docid: Option<u64>,
     pub candidates: u64,
 }
@@ -27,7 +29,9 @@ pub struct ParallelExecutor {
 
 impl ParallelExecutor {
     pub fn new(parallelism: usize) -> Self {
-        Self { sem: Arc::new(Semaphore::new(parallelism)) }
+        Self {
+            sem: Arc::new(Semaphore::new(parallelism)),
+        }
     }
 
     async fn run_one<F, Fut>(
@@ -42,7 +46,9 @@ impl ParallelExecutor {
     {
         let _permit: SemaphorePermit<'_> = self.sem.acquire().await?;
         // Если отменили — сразу выходим
-        if ct.is_cancelled() { anyhow::bail!("cancelled"); }
+        if ct.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
         // Вызов конкретной реализации поиска по сегменту
         search_fn(input, ct).await
     }
@@ -54,7 +60,7 @@ impl ParallelExecutor {
         search_fn: F,
         page_size: usize,
         deadline: Option<Duration>,
-    ) -> (Vec<SegmentTaskOutput>, bool, u32)
+    ) -> (Vec<SegmentTaskOutput>, bool, usize)
     where
         F: Fn(SegmentTaskInput, CancellationToken) -> Fut + Send + Sync + 'static + Copy,
         Fut: std::future::Future<Output = anyhow::Result<SegmentTaskOutput>>,
@@ -71,9 +77,12 @@ impl ParallelExecutor {
 
         let mut collected_hits = 0usize;
         while let Some(res) = if let Some(d) = deadline {
-            tokio::time::timeout(d.saturating_sub(started.elapsed()), futs.next()).await
+            tokio::time::timeout(d.saturating_sub(started.elapsed()), futs.next())
+                .await
                 .unwrap_or(None)
-        } else { futs.next().await } {
+        } else {
+            futs.next().await
+        } {
             match res {
                 Ok(out) => {
                     collected_hits += out.hits.len();
@@ -84,19 +93,22 @@ impl ParallelExecutor {
                         break;
                     }
                 }
-                Err(_) => { /* логгируем ошибку по сегменту, продолжаем */ }
+                Err(_) => { /* логгируем ошибку по сегменту, продолжаем */
+                }
             }
         }
 
         if futs.len() > 0 {
             // Если ещё были невыбранные фьючи и мы вышли по таймауту — пометим дедлайн
             if let Some(d) = deadline {
-                if started.elapsed() >= d { deadline_hit = true; }
+                if started.elapsed() >= d {
+                    deadline_hit = true;
+                }
             }
             ct.cancel();
         }
 
-        let saturated = (self.sem.available_permits() == 0) as u32;
+        let saturated = (self.sem.available_permits() == 0) as usize;
         (outputs, deadline_hit, saturated)
     }
 }

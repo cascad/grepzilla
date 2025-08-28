@@ -1,4 +1,3 @@
-// broker/src/search/paginator.rs
 use crate::search::types::*;
 use serde_json::json;
 
@@ -8,9 +7,9 @@ impl Paginator {
     pub fn merge(
         mut parts: Vec<crate::search::executor::SegmentTaskOutput>,
         page_size: usize,
-    ) -> (Vec<serde_json::Value>, Cursor, u64) {
+    ) -> (Vec<Hit>, Cursor, u64) {
         // Наивный мердж: просто конкат, затем truncate
-        parts.sort_by(|a,b| a.seg_path.cmp(&b.seg_path)); // стабильно
+        parts.sort_by(|a, b| a.seg_path.cmp(&b.seg_path)); // стабильно
         let mut hits = Vec::new();
         let mut candidates_total = 0u64;
         let mut per_seg = serde_json::Map::new();
@@ -26,7 +25,7 @@ impl Paginator {
         }
 
         let cursor = Cursor {
-            per_seg: serde_json::Value::Object(per_seg),
+            per_seg: per_seg,
             pin_gen: None,
         };
         (hits, cursor, candidates_total)
