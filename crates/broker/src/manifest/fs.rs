@@ -3,7 +3,7 @@ use tokio::fs;
 
 #[derive(Debug, Clone)]
 pub struct FsManifestStore {
-    pub path: String,
+    pub path: std::path::PathBuf, // PathBuf !
 }
 
 #[async_trait::async_trait]
@@ -23,11 +23,11 @@ impl ManifestStore for FsManifestStore {
         let mut pin = std::collections::HashMap::new();
         for &sh in shards {
             if let Some(ent) = m.shards.get(&sh) {
-                pin.insert(sh, ent.gen);
+                pin.insert(sh, ent.generation);
                 for p in &ent.segments {
                     out.push(SegRef {
                         shard: sh,
-                        gen: ent.gen,
+                        gen: ent.generation,
                         path: p.clone(),
                     });
                 }

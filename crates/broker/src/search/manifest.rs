@@ -12,7 +12,7 @@ pub struct Manifest {
 #[async_trait]
 pub trait ManifestStore: Send + Sync {
     async fn current(&self) -> anyhow::Result<HashMap<ShardId, GenId>>;
-    async fn segments_for(&self, shard: ShardId, gen: GenId) -> anyhow::Result<Vec<String>>;
+    async fn segments_for(&self, shard: ShardId, generation: GenId) -> anyhow::Result<Vec<String>>;
 }
 
 pub struct FsManifestStore {
@@ -22,7 +22,7 @@ pub struct FsManifestStore {
 #[derive(Debug, Clone)]
 pub struct SegRef {
     pub shard: u64,
-    pub gen: u64,
+    pub generation: u64, // ← вместо gen
     pub path: String,
 }
 
@@ -34,7 +34,7 @@ impl ManifestStore for FsManifestStore {
         Ok(m.shards)
     }
 
-    async fn segments_for(&self, shard: ShardId, gen: GenId) -> anyhow::Result<Vec<String>> {
+    async fn segments_for(&self, shard: ShardId, generation: GenId) -> anyhow::Result<Vec<String>> {
         let f = std::fs::File::open(&self.path)?;
         let m: Manifest = serde_json::from_reader(f)?;
         let key = format!("{shard}:{gen}");

@@ -1,28 +1,24 @@
-use grepzilla_segment::SegmentReader;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
-
-use crate::search::executor::{SegmentTaskInput, SegmentTaskOutput};
-use crate::search::snippet::build_snippet;
-use crate::search::types::Hit;
-
 use regex::Regex;
+use tracing::{debug, warn};
 
+use grepzilla_segment::SegmentReader;
 use grepzilla_segment::gram::{required_grams_from_wildcard, BooleanOp};
 use grepzilla_segment::normalizer::normalize;
 use grepzilla_segment::segjson::JsonSegmentReader;
 
-/// Простой экранизатор regex-метасимволов, кроме * и ? (мы обработаем их ниже).
+use crate::search::executor::{SegmentTaskInput, SegmentTaskOutput};
+use crate::search::types::Hit;
+
+/// Экранируем regex-метасимволы, оставляя * и ? (wildcard обрабатываем ниже).
 fn escape_regex_meta_keep_wildcards(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for ch in s.chars() {
         match ch {
-            // regex-метасимволы
             '.' | '+' | '(' | ')' | '|' | '{' | '}' | '[' | ']' | '^' | '$' | '\\' => {
                 out.push('\\');
                 out.push(ch);
             }
-            // wildcard — не экранируем, обработаем ниже
             '*' | '?' => out.push(ch),
             _ => out.push(ch),
         }
@@ -30,11 +26,10 @@ fn escape_regex_meta_keep_wildcards(s: &str) -> String {
     out
 }
 
-/// Конвертация wildcard → regex над УЖЕ нормализованной строкой.
+/// Конвертация wildcard → regex над уже нормализованной строкой.
 /// "*" -> ".*", "?" -> ".", без якорей (подстрочный матч).
 fn wildcard_norm_to_regex(norm_wildcard: &str) -> anyhow::Result<Regex> {
     let escaped = escape_regex_meta_keep_wildcards(norm_wildcard);
-    // заменим wildcard на regex-эквиваленты
     let mut pat = String::with_capacity(escaped.len() + 8);
     for ch in escaped.chars() {
         match ch {
@@ -54,8 +49,7 @@ pub async fn search_one_segment(
         anyhow::bail!("cancelled");
     }
 
-    println!("{:?}", input.seg_path.clone());
-    // 1) обязательные триграммы из wildcard (внутри есть normalize)
+    // 1) Обязательные триграммы из wildcard (внутри есть normalize)
     let req_grams = match required_grams_from_wildcard(&input.wildcard) {
         Ok(g) => g,
         Err(e) => {
@@ -69,19 +63,15 @@ pub async fn search_one_segment(
         }
     };
 
-    // 2) открываем сегмент синхронно (без spawn_blocking — чтобы не возиться с 'static/Send)
+    // 2) Открываем сегмент
     let seg_path = input.seg_path.clone();
-    let field_opt = if input.field.is_empty() {
-        None
-    } else {
-        Some(input.field.as_str())
-    };
+    let field_opt: Option<&str> = if input.field.is_empty() { None } else { Some(input.field.as_str()) };
 
-    tracing::debug!(seg=%seg_path, "about to open segment");
+    debug!(seg=%seg_path, "about to open segment");
     let reader = match JsonSegmentReader::open_segment(&seg_path) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(seg=%seg_path, error=?e, "failed to open segment");
+            warn!(seg=%seg_path, error=?e, "failed to open segment");
             return Ok(SegmentTaskOutput {
                 seg_path: input.seg_path,
                 hits: vec![],
@@ -90,17 +80,23 @@ pub async fn search_one_segment(
             });
         }
     };
-    tracing::debug!(seg=%seg_path, "segment opened OK");
+    debug!(seg=%seg_path, "segment opened OK");
 
     if ct.is_cancelled() {
         anyhow::bail!("cancelled");
     }
 
-    // 3) префильтр по триграммам (+ маска поля)
+    // 3) Префильтр по триграммам (+ маска поля)
     let bm_candidates = reader.prefilter(BooleanOp::And, &req_grams, field_opt)?;
-    tracing::debug!(seg=%seg_path, grams=%req_grams.len(), candidates=%bm_candidates.cardinality(), field=?field_opt, "prefilter done");
+    debug!(
+        seg=%seg_path,
+        grams=%req_grams.len(),
+        candidates=%bm_candidates.cardinality(),
+        field=?field_opt,
+        "prefilter done"
+    );
 
-    // 4) regex по НОРМАЛИЗОВАННОМУ wildcard (индекс хранит нормализованные строки)
+    // 4) Regex по НОРМАЛИЗОВАННОМУ wildcard (индекс хранит нормализованные строки)
     let norm_wc = normalize(&input.wildcard);
     let re = match wildcard_norm_to_regex(&norm_wc) {
         Ok(r) => r,
@@ -115,7 +111,7 @@ pub async fn search_one_segment(
         }
     };
 
-    // 5) перебор кандидатов с уважением курсора и лимита кандидатов
+    // 5) Перебор кандидатов c учётом курсора и лимита
     let max_candidates = input.max_candidates;
     let mut hits: Vec<Hit> = Vec::new();
     let mut candidates_seen: u64 = 0;
@@ -125,7 +121,6 @@ pub async fn search_one_segment(
         if ct.is_cancelled() {
             anyhow::bail!("cancelled");
         }
-
         if let Some(cur) = input.cursor_docid {
             if (doc_id as u64) <= cur {
                 continue;
@@ -139,36 +134,41 @@ pub async fn search_one_segment(
         }
 
         if let Some(doc) = reader.get_doc(doc_id) {
-            let matched = if let Some(f) = field_opt {
-                if let Some(val) = doc.fields.get(f) {
-                    re.is_match(val)
-                } else {
-                    false
+            // matched? и какое имя поля считать matched_field
+            let (is_match, matched_field_name): (bool, String) = match field_opt {
+                Some(f) => {
+                    let ok = doc.fields.get(f).map(|t| re.is_match(t)).unwrap_or(false);
+                    (ok, f.to_string())
                 }
-            } else {
-                // любой строковый field
-                doc.fields.values().any(|v| re.is_match(v))
+                None => {
+                    // ищем по всем строковым полям и берём первое совпавшее имя
+                    let mut found: Option<String> = None;
+                    for (name, text) in &doc.fields {
+                        if re.is_match(text) {
+                            found = Some(name.clone());
+                            break;
+                        }
+                    }
+                    (found.is_some(), found.unwrap_or_default())
+                }
             };
 
-            // выберем источник текста для сниппета
-            let text_str = doc
-                .fields
-                .get("text.body")
-                .or_else(|| doc.fields.get("text.title"))
-                .cloned() // скопировать String из BTreeMap
-                .unwrap_or_default(); // если ничего нет — пустая строка
-
-            // построим подсветку по уже скомпилированному regex'у (назовём его re)
-            let preview_str = build_snippet(&re, &text_str, 80);
-
-            if matched {
-                hits.push(Hit {
-                    doc_id: doc.doc_id,
-                    ext_id: doc.ext_id.clone(),
-                    preview: Some(preview_str),
-                    matched_field: field_opt.map(str::to_owned),
-                });
+            if !is_match {
+                continue;
             }
+
+            // (сниппет можем строить на будущее — пока в Hit его нет)
+            // let snippet_src = doc.fields.get(&matched_field_name).cloned()
+            //     .or_else(|| doc.fields.get("text.body").cloned())
+            //     .or_else(|| doc.fields.get("text.title").cloned())
+            //     .unwrap_or_default();
+            // let _preview = build_snippet(&re, &snippet_src, 80);
+
+            hits.push(Hit {
+                ext_id: doc.ext_id.clone(),
+                doc_id,
+                matched_field: matched_field_name,
+            });
         }
     }
 
@@ -178,4 +178,33 @@ pub async fn search_one_segment(
         last_docid,
         candidates: candidates_seen,
     })
+}
+
+// приватный хелпер (на будущее: если будет поле preview)
+fn build_snippet(rx: &Regex, text: &str, window: usize) -> String {
+    if let Some(m) = rx.find(text) {
+        let start = m.start();
+        let end = m.end();
+        let ctx = window.saturating_sub((end - start).min(window) + 2) / 2;
+        let from = start.saturating_sub(ctx);
+        let to = (end + ctx).min(text.len());
+
+        let mut out = String::new();
+        if from > 0 {
+            out.push('…');
+        }
+        out.push_str(&text[from..start]);
+        out.push('[');
+        out.push_str(&text[start..end]);
+        out.push(']');
+        out.push_str(&text[end..to]);
+        if to < text.len() {
+            out.push('…');
+        }
+        out
+    } else if text.len() > window {
+        format!("{}…", &text[..window])
+    } else {
+        text.to_string()
+    }
 }

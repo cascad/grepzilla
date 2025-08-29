@@ -47,7 +47,7 @@ async fn http_search_via_manifest_shards() {
 
     // app с манифестом
     let coord = SearchCoordinator::new(4)
-        .with_manifest(Arc::new(FsManifestStore { path: manifest_path.to_string_lossy().to_string() }));
+        .with_manifest(Arc::new(FsManifestStore { path: manifest_path }));
     let app = router(broker::http::AppState { coord: Arc::new(coord) });
 
     // запрос только с shards

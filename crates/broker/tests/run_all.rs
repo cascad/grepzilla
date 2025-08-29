@@ -62,7 +62,7 @@ async fn end_to_end_search_returns_hits() {
         .body(Body::from(body))
         .unwrap();
 
-    let resp = app.clone().oneshot(req).await.unwrap();
+    let resp = app.clone().into_service().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
         .await

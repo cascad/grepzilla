@@ -3,8 +3,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use broker::http;
 use tracing_subscriber::{fmt, EnvFilter};
+
+mod search;           // координатор и типы поиска (B5)
+mod storage_adapter;  // вызов поиска по одному сегменту
+mod config;           // конфиг (пока не используем, но оставляем)
+mod http;             // axum Router, хендлеры
 
 use crate::http::AppState;
 use crate::search::SearchCoordinator;
@@ -17,7 +21,7 @@ async fn main() -> Result<()> {
     let coord = Arc::new(SearchCoordinator::new(4));
     let state = AppState { coord };
 
-    let app = http::build_app();
+    let app = http::router(state);
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     tracing::info!(address = %addr, "broker listening");

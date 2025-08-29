@@ -7,7 +7,8 @@ pub mod fs;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShardEntry {
-    pub gen: u64,
+    #[serde(rename = "gen")]
+    pub generation: u64, // ← поле называется нормально
     pub segments: Vec<String>,
 }
 

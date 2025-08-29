@@ -1,18 +1,14 @@
+pub mod executor;
+pub mod paginator;
+pub mod types;
+
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
 use crate::manifest::{ManifestStore, SegRef};
 use crate::search::executor::{ParallelExecutor, SegmentTaskInput, SegmentTaskOutput};
 use crate::search::paginator::Paginator;
 use crate::search::types::*;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
-use tracing::debug;
-
-pub mod executor;
-pub mod manifest;
-pub mod paginator;
-pub mod selector;
-pub mod snippet;
-pub mod types;
 
 pub struct SearchCoordinator {
     default_parallelism: usize,
@@ -27,24 +23,22 @@ impl SearchCoordinator {
         }
     }
 
-    pub fn with_manifest(mut self, store: std::sync::Arc<dyn ManifestStore>) -> Self {
+    pub fn with_manifest(mut self, store: Arc<dyn ManifestStore>) -> Self {
         self.manifest = Some(store);
         self
     }
 
     pub async fn handle(&self, req: SearchRequest) -> anyhow::Result<SearchResponse> {
-        let start_instant = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
-        // --- выбрать сегменты ---
-        let mut pin_gen: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        // выбрать сегменты (shards → manifest; иначе — segments из запроса)
+        let mut pin_gen = std::collections::HashMap::new();
         let selected: Vec<SegRef> =
             if let (Some(store), Some(shards)) = (&self.manifest, req.shards.as_ref()) {
-                debug!(?shards, "B6: resolve shards via manifest");
-                let (segs, pin) = store.resolve(shards).await?;
+                let (segs, pin) = store.resolve(shards).await?; // resolve() теперь виден
                 pin_gen = pin;
                 segs
             } else {
-                // режим B5: берём, что прислал клиент
                 req.segments
                     .iter()
                     .map(|p| SegRef {
@@ -54,9 +48,7 @@ impl SearchCoordinator {
                     })
                     .collect()
             };
-        debug!(count = selected.len(), ?pin_gen, "B6: selected segments");
 
-        // --- запустить задачи ---
         let limits = req.limits.clone().unwrap_or(SearchLimits {
             parallelism: None,
             deadline_ms: None,
@@ -80,7 +72,7 @@ impl SearchCoordinator {
             .collect::<Vec<_>>();
 
         let ct = CancellationToken::new();
-        let deadline = limits.deadline();
+        let deadline = limits.deadline_duration();
 
         let search_fn = |input: SegmentTaskInput, ctok: CancellationToken| async move {
             let out = crate::storage_adapter::search_one_segment(input, ctok).await?;
@@ -92,17 +84,14 @@ impl SearchCoordinator {
             .await;
 
         let (hits, mut cursor, candidates_total) = Paginator::merge(parts, req.page.size);
-
-        // метрики
-        let time_to_first_hit_ms = if !hits.is_empty() {
-            start_instant.elapsed().as_millis() as u64
-        } else {
+        let ttfh = if hits.is_empty() {
             0
+        } else {
+            start.elapsed().as_millis() as u64
         };
 
-        // проставим pin_gen, если есть
         if !pin_gen.is_empty() {
-            cursor.pin_gen = Some(pin_gen.clone());
+            cursor.pin_gen = Some(pin_gen);
         }
 
         Ok(SearchResponse {
@@ -110,9 +99,9 @@ impl SearchCoordinator {
             cursor: Some(cursor),
             metrics: SearchMetrics {
                 candidates_total,
-                time_to_first_hit_ms,
+                time_to_first_hit_ms: ttfh,
                 deadline_hit,
-                saturated_sem,
+                saturated_sem: saturated_sem as u64,
             },
         })
     }
@@ -125,16 +114,4 @@ fn extract_last_docid(cursor: &Option<serde_json::Value>, seg: &str) -> Option<u
         .and_then(|ps| ps.get(seg))
         .and_then(|s| s.get("last_docid"))
         .and_then(|v| v.as_u64())
-}
-
-fn extract_pin_gen(cursor: &Option<serde_json::Value>) -> Option<HashMap<u64, u64>> {
-    let obj = cursor.as_ref()?.get("pin_gen")?.as_object()?;
-
-    let mut out = HashMap::new();
-    for (k, v) in obj {
-        if let (Ok(shard), Some(gen)) = (k.parse::<u64>(), v.as_u64()) {
-            out.insert(shard, gen);
-        }
-    }
-    Some(out)
 }
