@@ -7,7 +7,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
-use broker::http::{router, AppState};
+use broker::http_api::{router, AppState};
 use broker::search::SearchCoordinator;
 
 // для сборки сегмента

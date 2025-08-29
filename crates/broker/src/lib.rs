@@ -1,4 +1,4 @@
-pub mod http;
+pub mod http_api;
 pub mod manifest;
 pub mod search;
 pub mod storage_adapter;

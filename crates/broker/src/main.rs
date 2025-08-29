@@ -5,13 +5,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing_subscriber::{fmt, EnvFilter};
 
-mod search;           // координатор и типы поиска (B5)
-mod storage_adapter;  // вызов поиска по одному сегменту
-mod config;           // конфиг (пока не используем, но оставляем)
-mod http;             // axum Router, хендлеры
-
-use crate::http::AppState;
-use crate::search::SearchCoordinator;
+use broker::http_api::{self, AppState};
+use broker::search::SearchCoordinator;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,13 +16,12 @@ async fn main() -> Result<()> {
     let coord = Arc::new(SearchCoordinator::new(4));
     let state = AppState { coord };
 
-    let app = http::router(state);
+    let app = http_api::router(state);
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     tracing::info!(address = %addr, "broker listening");
     println!("=== BROKER START {}", env!("CARGO_PKG_VERSION"));
 
-    // axum 0.7 стиль: TcpListener + axum::serve
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 

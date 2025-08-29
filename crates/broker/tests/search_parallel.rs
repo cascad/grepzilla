@@ -7,7 +7,7 @@ async fn fills_page_and_cancels_rest() {
     let coord = SearchCoordinator::new(4);
     let req = SearchRequest {
         wildcard: "*игра*".into(),
-        field: "text.body".into(),
+        field: Some("text.body".to_string()),
         segments: vec![
             "segments/000001".into(),
             "segments/000002".into(),

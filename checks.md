@@ -174,3 +174,114 @@ B6
 или подключить etcd-реализацию ManifestStore.
 
 Готов прислать заготовку интеграционного теста search_http_shards.rs с временным manifest.json и двумя сегментами, если хочешь проверить B6 end-to-end.
+
+
+--------
+
+# из корня репо
+cargo build --release -p gzctl
+
+$root = (Resolve-Path ".").Path
+.\target\release\gzctl.exe build-seg --input "$root\examples\data.jsonl" --out "$root\segments\000001"
+.\target\release\gzctl.exe build-seg --input "$root\examples\data.jsonl" --out "$root\segments\000002"
+
+# быстрая самопроверка сегмента:
+.\target\release\gzctl.exe search-seg --seg "$root\segments\000001" --q "*игра*" --field text.body --debug-metrics
+
+--------
+
+1) manifest.json (поддерживаются оба формата)
+Вариант A — как у тебя (плоский)
+```json
+{
+  "shards": { "0": 1, "1": 7 },
+  "segments": {
+    "0:1": ["D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000001"],
+    "1:7": ["D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000002"]
+  }
+}
+```
+
+Вариант B — V1 (как в тесте)
+```json
+{
+  "version": 1,
+  "shards": {
+    "0": { "gen": 1, "segments": ["D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000001"] },
+    "1": { "gen": 7, "segments": ["D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000002"] }
+  }
+}
+```
+
+2) Запуск брокера
+# путь к манифесту (можно абсолютный)
+
+$env:GZ_MANIFEST = (Resolve-Path ".\manifest.json").Path
+# полезные логи
+$env:RUST_LOG = "broker=debug,grepzilla_segment=debug"
+cargo run -p broker
+
+В логах на POST увидишь: HIT /search, resolved shards -> segments, pin_gen=...
+
+-----
+
+Запрос через shards (B6)
+
+```sh
+# тело запроса (UTF-8 без BOM)
+$json = '{"wildcard":"*игра*","field":"text.body","shards":[0,1],
+          "page":{"size":2,"cursor":null},
+          "limits":{"parallelism":2,"deadline_ms":1000,"max_candidates":200000}}'
+
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllBytes("req.json", $utf8.GetBytes($json))
+
+# именно настоящий curl.exe
+& "$env:SystemRoot\System32\curl.exe" -s -X POST "http://127.0.0.1:8080/search" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  --data-binary "@req.json"
+```
+
+Что проверить в ответе
+
+hits — есть совпадения;
+cursor.per_seg — по одному ключу на каждый сегмент;
+cursor.pin_gen — должен быть {"0":1,"1":7} (или как в твоём manifest.json).
+
+-----
+
+Следующая страница (подставить cursor из ответа)
+
+```sh
+$cursor = '{"per_seg":{"D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000001":{"last_docid":1},"D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000002":{"last_docid":1}},"pin_gen":{"0":1,"1":7}}'
+
+$json = '{"wildcard":"*игра*","field":"text.body","shards":[0,1],
+          "page":{"size":2,"cursor":'+$cursor+'},
+          "limits":{"parallelism":2,"deadline_ms":1000,"max_candidates":200000}}'
+
+[IO.File]::WriteAllBytes("req.json", $utf8.GetBytes($json))
+
+& "$env:SystemRoot\System32\curl.exe" -s -X POST "http://127.0.0.1:8080/search" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  --data-binary "@req.json"
+
+```
+
+-----
+
+Совместимость: старый режим (segments напрямую)
+
+```sh
+$seg1 = (Resolve-Path ".\segments\000001").Path.Replace('\','\\')
+$seg2 = (Resolve-Path ".\segments\000002").Path.Replace('\','\\')
+
+$json = '{"wildcard":"*игра*","field":"text.body",
+          "segments":["'+$seg1+'","'+$seg2+'"],
+          "page":{"size":2,"cursor":null},
+          "limits":{"parallelism":2,"deadline_ms":1000,"max_candidates":200000}}'
+[IO.File]::WriteAllBytes("req.json", $utf8.GetBytes($json))
+
+& "$env:SystemRoot\System32\curl.exe" -s -X POST "http://127.0.0.1:8080/search" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  --data-binary "@req.json"
+```

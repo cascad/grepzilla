@@ -10,7 +10,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt; // для oneshot()
 
-use broker::http::{router, AppState};
+use broker::http_api::{router, AppState};
 use broker::search::SearchCoordinator;
 use grepzilla_segment::segjson::JsonSegmentWriter;
 use grepzilla_segment::SegmentWriter;
@@ -93,7 +93,7 @@ async fn end_to_end_search_two_segments() {
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    use broker::http::{router, AppState};
+    use broker::http_api::{router, AppState};
     use broker::search::SearchCoordinator;
     use grepzilla_segment::segjson::JsonSegmentWriter;
     use grepzilla_segment::SegmentWriter;
