@@ -1,3 +1,3 @@
 {"wildcard":"*игра*","field":"text.body","shards":[0,1],
-          "page":{"size":2,"cursor":{"per_seg":{"D:\\\\rust_repo\\\\grepzilla\\\\segments\\\\000001":{"last_docid":1}},"pin_gen":{"0":1,"1":7}}},
+          "page":{"size":2,"cursor":null},
           "limits":{"parallelism":2,"deadline_ms":1000,"max_candidates":200000}}
