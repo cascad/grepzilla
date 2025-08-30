@@ -1,9 +1,9 @@
+use grepzilla_segment::gram::{BooleanOp, required_grams_from_wildcard};
 use grepzilla_segment::segjson::{JsonSegmentReader, JsonSegmentWriter};
 use grepzilla_segment::{SegmentReader, SegmentWriter};
-use grepzilla_segment::gram::{required_grams_from_wildcard, BooleanOp};
-use tempfile::tempdir;
 use std::fs::File;
 use std::io::Write;
+use tempfile::tempdir;
 
 #[test]
 fn smoke_ingest_and_search() {
@@ -22,7 +22,8 @@ fn smoke_ingest_and_search() {
 
     // Build сегмент
     let mut w = JsonSegmentWriter::default();
-    w.write_segment(input_path.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+    w.write_segment(input_path.to_str().unwrap(), out.to_str().unwrap())
+        .unwrap();
 
     // Открываем и проверяем
     let reader = JsonSegmentReader::open_segment(out.to_str().unwrap()).unwrap();

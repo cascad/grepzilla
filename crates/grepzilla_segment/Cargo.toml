@@ -12,6 +12,9 @@ unicode-normalization = "0.1"
 regex = "1.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+memmap2 = "0.9"
+crc32fast = "1.4"
+crc64fast = "1.1.0"   # ECMA-182
 
 [dev-dependencies]
 tempfile = "3"

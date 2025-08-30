@@ -1,5 +1,5 @@
-// Файл: crates/gzctl/src/main.rs
 use anyhow::Result;
+use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use grepzilla_segment::gram::{BooleanOp, required_grams_from_wildcard};
 use grepzilla_segment::segjson::{JsonSegmentReader, JsonSegmentWriter};
@@ -7,12 +7,19 @@ use grepzilla_segment::{SegmentReader, SegmentWriter};
 use regex::Regex;
 use std::collections::HashMap;
 use std::time::Instant;
+use grepzilla_segment::v2::writer::BinSegmentWriter;
 
 #[derive(Parser)]
 #[command(version, about = "Grepzilla control: build/search SegmentV1 (JSON)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
+enum SegFormat {
+    V1,
+    V2,
 }
 
 #[derive(Subcommand)]
@@ -23,6 +30,8 @@ enum Cmd {
         input: String,
         #[arg(long)]
         out: String,
+        #[arg(long, value_enum, default_value_t=SegFormat::V1)]
+        format: SegFormat,
     },
     /// Поиск в одном сегменте (wildcard-паттерн)
     SearchSeg {
@@ -45,10 +54,16 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::BuildSeg { input, out } => {
-            let mut w = JsonSegmentWriter::default();
-            w.write_segment(&input, &out)?;
-        }
+        Cmd::BuildSeg { input, out, format } => match format {
+            SegFormat::V1 => {
+                let mut w = grepzilla_segment::segjson::JsonSegmentWriter::default();
+                w.write_segment(&input, &out)?;
+            }
+            SegFormat::V2 => {
+                let mut w = grepzilla_segment::v2::writer::BinSegmentWriter::default();
+                w.write_segment(&input, &out)?;
+            }
+        },
         Cmd::SearchSeg {
             seg,
             q,
