@@ -33,3 +33,10 @@ impl Default for MetaHeader {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct StoredDoc {
+    pub ext_id: String,
+    /// Отсортирован по field_id
+    pub fields: Vec<(u32, String)>,
+}

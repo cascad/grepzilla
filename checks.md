@@ -310,6 +310,8 @@ WAL append → периодический build-seg → обновить manifes
 --------
 C3
 
+cargo test -p grepzilla_segment v2_prefilter_and_field_mask_roundtrip -- --nocapture
+
 Дальше (план работ C3 — короткие итерации)
 
 Writer — grams:
@@ -331,3 +333,18 @@ Reader — prefilter():
 Reader — get_doc():
 навигация по docs.dat блокам, извлечение полей.
 Проверка: сниппеты/preview такие же, как V1.
+
+-----
+
+```sh
+cargo test -p grepzilla_segment v2_docs_roundtrip
+cargo test -p grepzilla_segment v2_prefilter_then_get_doc
+```
+
+Новые тесты проверяют:
+
+docs.dat round-trip: запись → чтение get_doc(), соответствие doc_id, ext_id, наличие ожидаемых полей/значений.
+
+Порча CRC у docs.dat → open_segment() падает.
+
+Интеграция: prefilter(AND, ["мир"], Some("text.body")) находит нужный doc_id, а get_doc() возвращает корректный документ.

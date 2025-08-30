@@ -1,16 +1,19 @@
+// crates/grepzilla_segment/src/v2/reader.rs
 use anyhow::{Result, anyhow, bail};
 use croaring::{Bitmap, Portable};
 use memmap2::Mmap;
+use once_cell::sync::OnceCell;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
 };
 
 use crate::gram::BooleanOp;
 use crate::v2::crc::crc64_ecma;
 use crate::v2::types::{META_HEADER_LEN, META_MAGIC, META_VERSION};
-use crate::{SegmentReader, StoredDoc}; // StoredDoc пока не используем
+use crate::{SegmentReader, StoredDoc}; // StoredDoc теперь используем
 
 pub struct BinSegmentReader {
     _meta_mmap: Mmap,
@@ -18,8 +21,16 @@ pub struct BinSegmentReader {
     grams_dat: Mmap,
     fields_idx: Mmap,
     fields_dat: Mmap,
+
+    // --- V2 docs.dat ---
+    docs_dat: Mmap,
+    docs_offsets_start: u64,
+    docs_payload_start: u64,
+    docs_cells: Vec<OnceCell<StoredDoc>>, // ленивый кеш по doc_id
+
     doc_count: u32,
     field_offsets: HashMap<String, (u64, u64)>, // field_name -> (off,len) в fields.dat
+    field_names_by_id: Vec<String>,             // индекс = field_id
 }
 
 impl SegmentReader for BinSegmentReader {
@@ -38,7 +49,7 @@ impl SegmentReader for BinSegmentReader {
         if magic != META_MAGIC || version != META_VERSION {
             bail!("not a V2 segment (magic/version mismatch)");
         }
-        // считаем CRC64 по "всему файлу без последних 8 байт"
+        // CRC64 по телу без последнего u64
         let file_len = meta_m.len();
         if file_len < (META_HEADER_LEN as usize + 8) {
             bail!("meta.bin too small");
@@ -50,10 +61,8 @@ impl SegmentReader for BinSegmentReader {
             bail!("meta.bin CRC mismatch");
         }
 
-        let doc_count = u32::from_le_bytes(meta_m[8..12].try_into().unwrap()); // hdr.doc_count (u64) → берём младшие 4 байта
-        // грамотно:
         let mut u64buf = [0u8; 8];
-        u64buf.copy_from_slice(&meta_m[8..16]);
+        u64buf.copy_from_slice(&meta_m[8..16]); // hdr.doc_count (u64)
         let doc_count = u64::from_le_bytes(u64buf) as u32;
 
         // grams.idx/dat
@@ -64,8 +73,36 @@ impl SegmentReader for BinSegmentReader {
         let fields_idx_m = mmap_with_crc(base.join("fields.idx"))?;
         let fields_dat_m = mmap_with_crc(base.join("fields.dat"))?;
 
-        // распарсим fields.idx → словарь имён и оффсеты
-        let field_offsets = parse_fields_index(&fields_idx_m)?;
+        // распарсим fields.idx → (словарь оффсетов по имени, список имён по field_id)
+        let (field_offsets, field_names_by_id) = parse_fields_index(&fields_idx_m)?;
+
+        // --- docs.dat ---
+        let docs_dat_m = mmap_with_crc(base.join("docs.dat"))?;
+        if docs_dat_m.len() < 8 + 8 + 8 + 8 {
+            bail!("docs.dat too small");
+        }
+        let dd_body = &docs_dat_m[..docs_dat_m.len() - 8]; // без CRC
+        if &dd_body[0..8] != b"GZDOCS2\0" {
+            bail!("docs.dat bad magic");
+        }
+        // DOC_COUNT
+        let mut b8 = [0u8; 8];
+        b8.copy_from_slice(&dd_body[8..16]);
+        let docs_doc_count = u64::from_le_bytes(b8) as u32;
+        if docs_doc_count != doc_count {
+            bail!("docs.dat doc_count mismatch (meta vs docs.dat)");
+        }
+        // OFFSETS_COUNT = doc_count + 1
+        b8.copy_from_slice(&dd_body[16..24]);
+        let offsets_count = u64::from_le_bytes(b8);
+        if offsets_count != (docs_doc_count as u64) + 1 {
+            bail!("docs.dat offsets_count mismatch");
+        }
+        let docs_offsets_start = 24u64;
+        let docs_payload_start = docs_offsets_start + offsets_count * 8;
+
+        // инициализируем OnceCell на каждый документ (стабильная длина)
+        let docs_cells = (0..doc_count as usize).map(|_| OnceCell::new()).collect();
 
         Ok(Self {
             _meta_mmap: meta_m,
@@ -73,8 +110,15 @@ impl SegmentReader for BinSegmentReader {
             grams_dat: grams_dat_m,
             fields_idx: fields_idx_m,
             fields_dat: fields_dat_m,
+
+            docs_dat: docs_dat_m,
+            docs_offsets_start,
+            docs_payload_start,
+            docs_cells,
+
             doc_count,
             field_offsets,
+            field_names_by_id,
         })
     }
 
@@ -147,13 +191,91 @@ impl SegmentReader for BinSegmentReader {
         Ok(acc)
     }
 
-    fn get_doc(&self, _doc_id: u32) -> Option<&StoredDoc> {
-        // C3.2: реализуем позже (docs.dat)
-        None
+    fn get_doc(&self, doc_id: u32) -> Option<&StoredDoc> {
+        if doc_id >= self.doc_count {
+            return None;
+        }
+        if let Some(doc) = self.docs_cells[doc_id as usize].get() {
+            return Some(doc);
+        }
+        let (from, to) = self.doc_bounds(doc_id)?;
+        let parsed = match self.parse_doc(doc_id, from, to) {
+            Ok(d) => d,
+            Err(_) => return None,
+        };
+        let _ = self.docs_cells[doc_id as usize].set(parsed);
+        self.docs_cells[doc_id as usize].get()
     }
 }
 
-// --- helpers ---
+// --- docs.dat helpers ---
+
+impl BinSegmentReader {
+    #[inline]
+    fn docs_offsets_slice(&self) -> &[u8] {
+        &self.docs_dat[self.docs_offsets_start as usize..self.docs_payload_start as usize]
+    }
+
+    #[inline]
+    fn docs_payload_slice(&self) -> &[u8] {
+        &self.docs_dat[self.docs_payload_start as usize..self.docs_dat.len() - 8] // без CRC
+    }
+
+    fn doc_bounds(&self, doc_id: u32) -> Option<(usize, usize)> {
+        if doc_id >= self.doc_count {
+            return None;
+        }
+        let offs = self.docs_offsets_slice();
+        let i = doc_id as usize;
+        let from = u64::from_le_bytes(offs[i * 8..i * 8 + 8].try_into().ok()?) as usize;
+        let to = u64::from_le_bytes(offs[(i + 1) * 8..(i + 1) * 8 + 8].try_into().ok()?) as usize;
+        Some((from, to))
+    }
+
+    fn parse_doc(&self, doc_id: u32, from: usize, to: usize) -> Result<StoredDoc> {
+        let payload = &self.docs_payload_slice()[from..to];
+        let mut p = 0usize;
+
+        // ext_id
+        let (ext_len, adv1) = get_uvar_u64(&payload[p..])?;
+        p += adv1;
+        let ext_end = p + (ext_len as usize);
+        if ext_end > payload.len() {
+            bail!("docs.dat ext_id OOB");
+        }
+        let ext_id = std::str::from_utf8(&payload[p..ext_end])?.to_string();
+        p = ext_end;
+
+        // fields_len
+        let (fl, adv2) = get_uvar_u64(&payload[p..])?;
+        p += adv2;
+
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        for _ in 0..fl {
+            let (fid, a1) = get_uvar_u64(&payload[p..])?;
+            p += a1;
+            let (slen, a2) = get_uvar_u64(&payload[p..])?;
+            p += a2;
+            let s_end = p + (slen as usize);
+            if s_end > payload.len() {
+                bail!("docs.dat field string OOB");
+            }
+            let s = std::str::from_utf8(&payload[p..s_end])?.to_string();
+            p = s_end;
+            if let Some(name) = self.field_names_by_id.get(fid as usize) {
+                fields.insert(name.clone(), s);
+            }
+        }
+
+        Ok(StoredDoc {
+            doc_id,
+            ext_id,
+            fields,
+        })
+    }
+}
+
+// --- helpers (без изменений снизу, кроме использования выше) ---
 
 fn mmap_with_crc(p: PathBuf) -> Result<Mmap> {
     let f = File::open(&p)?;
@@ -169,7 +291,7 @@ fn mmap_with_crc(p: PathBuf) -> Result<Mmap> {
     Ok(m)
 }
 
-fn parse_fields_index(idx: &Mmap) -> Result<HashMap<String, (u64, u64)>> {
+fn parse_fields_index(idx: &Mmap) -> Result<(HashMap<String, (u64, u64)>, Vec<String>)> {
     if idx.len() < 4 + 2 + 2 + 4 + 4 + 8 {
         bail!("fields.idx too small");
     }
@@ -204,7 +326,7 @@ fn parse_fields_index(idx: &Mmap) -> Result<HashMap<String, (u64, u64)>> {
             .clone();
         map.insert(name, (off, len));
     }
-    Ok(map)
+    Ok((map, names))
 }
 
 fn get_uvar(bytes: &[u8]) -> Result<(usize, usize)> {

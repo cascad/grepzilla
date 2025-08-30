@@ -11,6 +11,7 @@ pub mod manifest_store;
 pub mod cursor;
 pub mod search;
 pub mod v2;
+pub mod common;
 
 /// Внешняя модель документа при ingest
 #[derive(Debug, Clone, Serialize, Deserialize)]

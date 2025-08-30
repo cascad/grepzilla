@@ -1,3 +1,4 @@
+// crates/grepzilla_segment/src/v2/writer.rs
 use anyhow::{Result, anyhow};
 use croaring::Bitmap;
 use serde_json::Value;
@@ -13,11 +14,20 @@ use crate::v2::types::{META_HEADER_LEN, MetaHeader};
 use crate::{normalizer::normalize, v2::codec::put_varint_to_writer};
 use croaring::Portable;
 
+const DOCS_MAGIC: &[u8; 8] = b"GZDOCS2\0";
+
 pub struct BinSegmentWriter;
 impl Default for BinSegmentWriter {
     fn default() -> Self {
         Self
     }
+}
+
+#[derive(Default)]
+struct DocTmp {
+    ext_id: String,
+    // на первом проходе храним имя поля, позже сопоставим с field_id
+    fields: Vec<(String, String)>, // (field_name, normalized_value)
 }
 
 impl crate::SegmentWriter for BinSegmentWriter {
@@ -31,6 +41,7 @@ impl crate::SegmentWriter for BinSegmentWriter {
         let mut doc_count: u32 = 0;
         let mut grams: HashMap<[u8; 3], Vec<u32>> = HashMap::new();
         let mut field_masks: HashMap<String, Bitmap> = HashMap::new();
+        let mut docs_tmp: Vec<DocTmp> = Vec::new(); // NEW
 
         for line in br.lines() {
             let line = line?;
@@ -38,6 +49,20 @@ impl crate::SegmentWriter for BinSegmentWriter {
                 continue;
             }
             let v: Value = serde_json::from_str(&line)?;
+
+            // ext_id
+            let ext_id = v
+                .get("_id")
+                .and_then(|vv| vv.as_str())
+                .ok_or_else(|| anyhow!("_id missing or not string"))?
+                .to_string();
+
+            docs_tmp.push(DocTmp {
+                ext_id,
+                fields: Vec::new(),
+            });
+            let cur_ix = docs_tmp.len() - 1;
+
             // обойдём все строковые поля (как в V1)
             collect_strings("", &v, &mut |path, s| {
                 let ns = normalize(s);
@@ -54,6 +79,9 @@ impl crate::SegmentWriter for BinSegmentWriter {
                     .entry(path.to_string())
                     .or_default()
                     .add(doc_count);
+
+                // NEW: для docs.dat
+                docs_tmp[cur_ix].fields.push((path.to_string(), ns));
             });
 
             doc_count += 1;
@@ -102,7 +130,7 @@ impl crate::SegmentWriter for BinSegmentWriter {
                 let mut prev = list[0];
                 for &d in &list[1..] {
                     let delta = (d - prev) as u64;
-                    put_varint_to_writer(delta, &mut grams_dat);
+                    put_varint_to_writer(delta, &mut grams_dat)?;
                     prev = d;
                 }
             }
@@ -192,14 +220,81 @@ impl crate::SegmentWriter for BinSegmentWriter {
         // footer CRC64
         let (fields_idx_body_len, _crc) = finalize_with_crc64(&mut fields_idx)?;
 
-        // docs.dat — пока пустой (только CRC64 пустого тела)
-
+        // ----------------------------
+        // docs.dat — ПОЛНОЦЕННАЯ запись
+        // ----------------------------
         let mut docs_dat = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(&docs_dat_path)?;
+
+        // словарь name -> field_id (индекс в field_names)
+        let mut name_to_id: HashMap<&str, u32> = HashMap::new();
+        for (fid, name) in field_names.iter().enumerate() {
+            name_to_id.insert(name.as_str(), fid as u32);
+        }
+
+        // header
+        docs_dat.write_all(DOCS_MAGIC)?;
+        docs_dat.write_all(&(doc_count as u64).to_le_bytes())?;
+        let offsets_count = (doc_count as u64) + 1;
+        docs_dat.write_all(&offsets_count.to_le_bytes())?;
+
+        // offsets placeholder
+        let offsets_pos = docs_dat.stream_position()?;
+        for _ in 0..offsets_count {
+            docs_dat.write_all(&0u64.to_le_bytes())?;
+        }
+
+        // payload start
+        let payload_start = docs_dat.stream_position()?;
+        let mut rel_offsets: Vec<u64> = Vec::with_capacity(docs_tmp.len() + 1);
+
+        // helper для varint
+        let mut write_uvar = |x: u64, w: &mut std::fs::File| -> anyhow::Result<()> {
+            put_varint_to_writer(x, w)?;
+            Ok(())
+        };
+
+        for d in &docs_tmp {
+            let abs_start = docs_dat.stream_position()?;
+            rel_offsets.push(abs_start - payload_start);
+
+            // ext_id
+            write_uvar(d.ext_id.as_bytes().len() as u64, &mut docs_dat)?;
+            docs_dat.write_all(d.ext_id.as_bytes())?;
+
+            // сопоставим поля -> (fid, &str), сортируем по fid
+            let mut mapped: Vec<(u32, &str)> = Vec::new();
+            for (name, val) in &d.fields {
+                if let Some(fid) = name_to_id.get(name.as_str()) {
+                    mapped.push((*fid, val.as_str()));
+                }
+            }
+            mapped.sort_by_key(|(fid, _)| *fid);
+
+            // fields_len
+            write_uvar(mapped.len() as u64, &mut docs_dat)?;
+            for (fid, val) in mapped {
+                write_uvar(fid as u64, &mut docs_dat)?;
+                write_uvar(val.as_bytes().len() as u64, &mut docs_dat)?;
+                docs_dat.write_all(val.as_bytes())?;
+            }
+        }
+
+        // guard offset
+        let end = docs_dat.stream_position()?;
+        rel_offsets.push(end - payload_start);
+
+        // вернуться и записать offsets
+        docs_dat.seek(SeekFrom::Start(offsets_pos))?;
+        for o in &rel_offsets {
+            docs_dat.write_all(&o.to_le_bytes())?;
+        }
+
+        // footer CRC64
         let (docs_dat_body_len, _crc) = finalize_with_crc64(&mut docs_dat)?;
 
         // meta.bin
@@ -258,6 +353,7 @@ fn put_uvar(x: u64, out: &mut Vec<u8>) {
 }
 
 fn collect_strings(path: &str, v: &serde_json::Value, f: &mut impl FnMut(&str, &str)) {
+    use serde_json::Value;
     match v {
         Value::String(s) => f(path, s),
         Value::Object(map) => {
