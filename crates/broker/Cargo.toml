@@ -28,8 +28,16 @@ tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "time", "sy
 serde_json = "1.0"
 tower = {version = "0.4", features = ["util"]}
 tempfile = "3"
-
+http-body-util = "0.1"
 
 [[bench]]
 name = "search_bench"
+harness = false
+
+[[bench]]
+name = "v2_prefilter_bench"
+harness = false
+
+[[bench]]
+name = "v2_getdoc_bench"
 harness = false

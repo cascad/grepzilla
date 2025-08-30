@@ -21,10 +21,10 @@ pub struct Budgets {
 /// Важно: `pin_gen` фиксирует конкретную генерацию манифеста per shard.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchCursor {
-    pub matcher_hash: String,                 // sha256 от (query, field, flags)
-    pub pin_gen: HashMap<u64, u64>,           // shard_id -> gen
-    pub state: Vec<ShardPos>,                 // координаты по сегментам
-    pub budgets: Budgets,                     // лимиты
+    pub matcher_hash: String,       // sha256 от (query, field, flags)
+    pub pin_gen: HashMap<u64, u64>, // shard_id -> gen
+    pub state: Vec<ShardPos>,       // координаты по сегментам
+    pub budgets: Budgets,           // лимиты
 }
 
 #[cfg(test)]
@@ -38,8 +38,16 @@ mod tests {
         let c = SearchCursor {
             matcher_hash: "abc".to_string(),
             pin_gen: pin,
-            state: vec![ShardPos { shard: 17, segment: "s-abc".into(), block: 7, last_docid: 42 }],
-            budgets: Budgets { candidates: 1000, verify_ms: 500 },
+            state: vec![ShardPos {
+                shard: 17,
+                segment: "s-abc".into(),
+                block: 7,
+                last_docid: 42,
+            }],
+            budgets: Budgets {
+                candidates: 1000,
+                verify_ms: 500,
+            },
         };
         let j = serde_json::to_string(&c).unwrap();
         let back: SearchCursor = serde_json::from_str(&j).unwrap();

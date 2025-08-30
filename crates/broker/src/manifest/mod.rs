@@ -25,8 +25,8 @@ pub struct ManifestV1 {
 /// }
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ManifestFlat {
-    pub shards: HashMap<u64, u64>,                  // shard -> gen
-    pub segments: HashMap<String, Vec<String>>,     // "shard:gen" -> paths
+    pub shards: HashMap<u64, u64>,              // shard -> gen
+    pub segments: HashMap<String, Vec<String>>, // "shard:gen" -> paths
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +39,7 @@ pub struct SegRef {
 /// Унифицированный вид внутри брокера
 #[derive(Debug, Clone)]
 pub struct ManifestUnified {
-    pub pin_gen: HashMap<u64, u64>, // shard -> gen
+    pub pin_gen: HashMap<u64, u64>,             // shard -> gen
     pub segs: HashMap<(u64, u64), Vec<String>>, // (shard, gen) -> paths
 }
 
@@ -76,7 +76,11 @@ impl ManifestUnified {
                 pin.insert(sh, gen);
                 if let Some(paths) = self.segs.get(&(sh, gen)) {
                     for p in paths {
-                        out.push(SegRef { shard: sh, gen, path: p.clone() });
+                        out.push(SegRef {
+                            shard: sh,
+                            gen,
+                            path: p.clone(),
+                        });
                     }
                 }
             }

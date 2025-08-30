@@ -24,11 +24,11 @@ pub fn collect_strings(json: &Value) -> Vec<(String, String)> {
     out
 }
 
-fn collect_inner<F: Fn(&str)->String>(
+fn collect_inner<F: Fn(&str) -> String>(
     prefix: &str,
     v: &serde_json::Value,
-    out: &mut Vec<(String,String)>,
-    norm: &F
+    out: &mut Vec<(String, String)>,
+    norm: &F,
 ) {
     match v {
         serde_json::Value::String(s) => out.push((prefix.to_string(), norm(s))),

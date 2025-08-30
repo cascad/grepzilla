@@ -6,11 +6,17 @@ use grepzilla_segment::segjson::{JsonSegmentReader, JsonSegmentWriter};
 use grepzilla_segment::{SegmentReader, SegmentWriter};
 use regex::Regex;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Instant;
+
+use grepzilla_segment::v2::reader::BinSegmentReader;
 use grepzilla_segment::v2::writer::BinSegmentWriter;
 
 #[derive(Parser)]
-#[command(version, about = "Grepzilla control: build/search SegmentV1 (JSON)")]
+#[command(
+    version,
+    about = "Grepzilla control: build/search SegmentV1 (JSON) + SegmentV2 (binary)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -33,7 +39,9 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t=SegFormat::V1)]
         format: SegFormat,
     },
-    /// Поиск в одном сегменте (wildcard-паттерн)
+    /// Поиск в одном или нескольких сегментах (список через запятую)
+    ///
+    /// Пример: --seg "segments/seg1,segments/seg2"
     SearchSeg {
         #[arg(long)]
         seg: String,
@@ -56,11 +64,11 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::BuildSeg { input, out, format } => match format {
             SegFormat::V1 => {
-                let mut w = grepzilla_segment::segjson::JsonSegmentWriter::default();
+                let mut w = JsonSegmentWriter::default();
                 w.write_segment(&input, &out)?;
             }
             SegFormat::V2 => {
-                let mut w = grepzilla_segment::v2::writer::BinSegmentWriter::default();
+                let mut w = BinSegmentWriter::default();
                 w.write_segment(&input, &out)?;
             }
         },
@@ -73,77 +81,160 @@ fn main() -> Result<()> {
             debug_metrics,
         } => {
             let start = Instant::now();
+            // разберём список сегментов (через запятую)
+            let segs: Vec<String> = seg
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
 
-            let reader = JsonSegmentReader::open_segment(&seg)?;
+            // заранее подготовим общий regex и grams (одни и те же для всех сегментов)
             let grams = required_grams_from_wildcard(&q)?;
-            let bm = reader.prefilter(BooleanOp::And, &grams, field.as_deref())?;
             let rx = wildcard_to_regex(&q)?;
 
-            let mut shown = 0usize;
-            let mut skipped = 0usize;
+            // агрегированные метрики
+            let mut total_doc_count = 0u64;
+            let mut scanned_docs = 0usize;
             let mut candidates = 0usize;
             let mut verified = 0usize;
+            let mut shown = 0usize;
+            let mut skipped = 0usize;
             let mut by_field: HashMap<String, usize> = HashMap::new();
-            let mut scanned_docs = 0usize;
 
-            for doc_id in bm.iter() {
-                candidates += 1;
-                scanned_docs += 1;
+            // общий вывод: печатаем по мере нахождения (в порядке сегментов)
+            'outer: for seg_dir in segs {
+                let is_v2 = Path::new(&seg_dir).join("meta.bin").exists();
+                if is_v2 {
+                    // --- V2 ---
+                    let reader = BinSegmentReader::open_segment(&seg_dir)?;
+                    total_doc_count += reader.doc_count() as u64;
 
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                if shown >= limit {
-                    break;
-                }
+                    // префильтр
+                    let bm = reader.prefilter(BooleanOp::And, &grams, field.as_deref())?;
+                    // prefetch_docs: прогреем первые limit*2 doc_id (если их меньше — сколько есть)
+                    let warm: Vec<u32> = bm.iter().take(limit.saturating_mul(2)).collect();
+                    reader.prefetch_docs(warm.into_iter());
 
-                if let Some(doc) = reader.get_doc(doc_id) {
-                    // Проверяем совпадение: либо конкретное поле, либо первое подходящее
-                    let (matched, matched_field) = match field.as_deref() {
-                        Some(f) => {
-                            let ok = doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false);
-                            (ok, ok.then(|| f.to_string()))
+                    for doc_id in bm.iter() {
+                        candidates += 1;
+                        scanned_docs += 1;
+
+                        // глобальный offset/limit
+                        if skipped < offset {
+                            skipped += 1;
+                            continue;
                         }
-                        None => {
-                            if let Some((k, _)) = doc.fields.iter().find(|(_, t)| rx.is_match(t)) {
-                                (true, Some(k.clone()))
-                            } else {
-                                (false, None)
+                        if shown >= limit {
+                            break 'outer;
+                        }
+
+                        if let Some(doc) = reader.get_doc(doc_id) {
+                            // проверка совпадения
+                            let (matched, matched_field) = match field.as_deref() {
+                                Some(f) => {
+                                    let ok =
+                                        doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false);
+                                    (ok, ok.then(|| f.to_string()))
+                                }
+                                None => {
+                                    if let Some((k, _)) =
+                                        doc.fields.iter().find(|(_, t)| rx.is_match(t))
+                                    {
+                                        (true, Some(k.clone()))
+                                    } else {
+                                        (false, None)
+                                    }
+                                }
+                            };
+                            if !matched {
+                                continue;
                             }
+                            verified += 1;
+
+                            // превью
+                            let (preview_field, text) = pick_preview_field(doc, field.as_deref());
+                            let preview = build_snippet(&rx, &text, 80);
+
+                            let stat_field = matched_field
+                                .as_deref()
+                                .unwrap_or_else(|| preview_field.unwrap_or("-"));
+                            *by_field.entry(stat_field.to_string()).or_insert(0) += 1;
+
+                            println!(
+                                "{}\t{}\t{}: {}",
+                                doc.ext_id,
+                                doc_id,
+                                preview_field.unwrap_or("-"),
+                                preview
+                            );
+                            shown += 1;
                         }
-                    };
-                    if !matched {
-                        continue;
                     }
-                    verified += 1;
+                } else {
+                    // --- V1 ---
+                    let reader = JsonSegmentReader::open_segment(&seg_dir)?;
+                    total_doc_count += reader.doc_count() as u64;
 
-                    // Выбираем текст для превью (приоритет: field -> text.body -> text.title -> любое)
-                    let (preview_field, text) = pick_preview_field(doc, field.as_deref());
+                    let bm = reader.prefilter(BooleanOp::And, &grams, field.as_deref())?;
+                    for doc_id in bm.iter() {
+                        candidates += 1;
+                        scanned_docs += 1;
 
-                    // Сниппет с подсветкой первой матч-зоны
-                    let preview = build_snippet(&rx, &text, 80);
+                        if skipped < offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        if shown >= limit {
+                            break 'outer;
+                        }
 
-                    // Имя поля для статистики: именно где матч нашёлся, иначе превью-поле
-                    let stat_field = matched_field
-                        .as_deref()
-                        .unwrap_or_else(|| preview_field.unwrap_or("-"));
-                    *by_field.entry(stat_field.to_string()).or_insert(0) += 1;
+                        if let Some(doc) = reader.get_doc(doc_id) {
+                            // проверка совпадения
+                            let (matched, matched_field) = match field.as_deref() {
+                                Some(f) => {
+                                    let ok =
+                                        doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false);
+                                    (ok, ok.then(|| f.to_string()))
+                                }
+                                None => {
+                                    if let Some((k, _)) =
+                                        doc.fields.iter().find(|(_, t)| rx.is_match(t))
+                                    {
+                                        (true, Some(k.clone()))
+                                    } else {
+                                        (false, None)
+                                    }
+                                }
+                            };
+                            if !matched {
+                                continue;
+                            }
+                            verified += 1;
 
-                    println!(
-                        "{}\t{}\t{}: {}",
-                        doc.ext_id,
-                        doc_id,
-                        preview_field.unwrap_or("-"),
-                        preview
-                    );
-                    shown += 1;
+                            let (preview_field, text) = pick_preview_field(doc, field.as_deref());
+                            let preview = build_snippet(&rx, &text, 80);
+
+                            let stat_field = matched_field
+                                .as_deref()
+                                .unwrap_or_else(|| preview_field.unwrap_or("-"));
+                            *by_field.entry(stat_field.to_string()).or_insert(0) += 1;
+
+                            println!(
+                                "{}\t{}\t{}: {}",
+                                doc.ext_id,
+                                doc_id,
+                                preview_field.unwrap_or("-"),
+                                preview
+                            );
+                            shown += 1;
+                        }
+                    }
                 }
             }
 
+            // метрики
             if debug_metrics {
                 let elapsed_ms = start.elapsed().as_millis() as u64;
-                // Дополнительные вычисляемые метрики
                 let ratio_verified = if candidates > 0 {
                     (verified as f64) / (candidates as f64)
                 } else {
@@ -154,24 +245,29 @@ fn main() -> Result<()> {
                 } else {
                     0.0
                 };
-
                 let metrics = serde_json::json!({
-                    "segment_path": seg,
+                    "segments": seg,
                     "query": q,
                     "field_filter": field,
                     "elapsed_ms": elapsed_ms,
-                    "doc_count": reader.doc_count(),
-                    "scanned_docs": scanned_docs,     // сколько doc_id прошли через цикл (по bitmap)
-                    "candidates_total": candidates,   // кандидаты префильтра (равно scanned_docs в данном цикле)
-                    "verified_total": verified,       // прошли regex
-                    "hits_total": shown,              // выданы пользователю (limit/offset учтены)
+                    "total_doc_count": total_doc_count,
+                    "scanned_docs": scanned_docs,
+                    "candidates_total": candidates,
+                    "verified_total": verified,
+                    "hits_total": shown,
+                    "offset": offset,
+                    "limit": limit,
                     "ratios": {
                         "prefilter_to_verify": ratio_verified,
                         "verify_to_hits": ratio_hits,
                     },
-                    "by_field": by_field,             // распределение по полям, где зафиксирован матч
+                    "by_field": by_field,
                 });
                 eprintln!("{}", serde_json::to_string_pretty(&metrics)?);
+            }
+
+            if shown == 0 {
+                println!("0 hits");
             }
         }
     }

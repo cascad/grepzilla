@@ -128,6 +128,25 @@ impl SegmentReader for BinSegmentReader {
 
     fn prefilter(&self, op: BooleanOp, grams: &[String], field: Option<&str>) -> Result<Bitmap> {
         use BooleanOp::*;
+
+        // Если не нашлось ни одной валидной 3-граммы — считаем «все документы»,
+        // а затем пересекаем с маской поля (если задана).
+        if grams.iter().all(|g| g.as_bytes().len() < 3) {
+            let mut all = Bitmap::new();
+            if self.doc_count > 0 {
+                all.add_range(0..self.doc_count);
+            }
+            if let Some(fname) = field {
+                if let Some((off, len)) = self.field_offsets.get(fname).copied() {
+                    let mask = read_field_bitmap(&self.fields_dat, off, len)?;
+                    all.and_inplace(&mask);
+                } else {
+                    all.clear();
+                }
+            }
+            return Ok(all);
+        }
+
         let mut vec_bm: Vec<Bitmap> = Vec::new();
 
         for g in grams {
@@ -211,6 +230,13 @@ impl SegmentReader for BinSegmentReader {
 // --- docs.dat helpers ---
 
 impl BinSegmentReader {
+    /// Синхронный прогрев OnceCell по списку doc_id.
+    pub fn prefetch_docs<I: IntoIterator<Item = u32>>(&self, ids: I) {
+        for id in ids {
+            let _ = self.get_doc(id);
+        }
+    }
+
     #[inline]
     fn docs_offsets_slice(&self) -> &[u8] {
         &self.docs_dat[self.docs_offsets_start as usize..self.docs_payload_start as usize]

@@ -29,12 +29,7 @@ fn v2_docs_roundtrip_and_crc() {
         r#"{{"_id":"B2","title":"Привет","text":{{"body":"мир 🌍"}}}}"#
     )
     .unwrap();
-    writeln!(
-        jf,
-        r#"{{"_id":"C3","notes":"{}"}}"#,
-        "X".repeat(8192)
-    )
-    .unwrap();
+    writeln!(jf, r#"{{"_id":"C3","notes":"{}"}}"#, "X".repeat(8192)).unwrap();
 
     // build сегмент V2
     let mut w = BinSegmentWriter::default();
@@ -79,7 +74,11 @@ fn v2_docs_roundtrip_and_crc() {
 
 fn flip_last_byte(path: &PathBuf) {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
     let len = f.metadata().unwrap().len();
     assert!(len >= 1);
     f.seek(SeekFrom::Start(len - 1)).unwrap();

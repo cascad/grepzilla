@@ -203,6 +203,7 @@ dependencies = [
  "criterion",
  "futures",
  "grepzilla_segment",
+ "http-body-util",
  "nanoid",
  "regex",
  "serde",

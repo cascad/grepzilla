@@ -1,14 +1,18 @@
 // broker/src/ingest/wal.rs
-use tokio::{fs, io::AsyncWriteExt};
-use std::path::{Path, PathBuf};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
+use tokio::{fs, io::AsyncWriteExt};
 
 pub struct Wal {
     dir: PathBuf,
 }
 
 impl Wal {
-    pub fn new<P: AsRef<Path>>(dir: P) -> Self { Self { dir: dir.as_ref().into() } }
+    pub fn new<P: AsRef<Path>>(dir: P) -> Self {
+        Self {
+            dir: dir.as_ref().into(),
+        }
+    }
 
     pub async fn append_batch(&self, batch: &[Value]) -> anyhow::Result<(String, usize)> {
         fs::create_dir_all(&self.dir).await.ok();

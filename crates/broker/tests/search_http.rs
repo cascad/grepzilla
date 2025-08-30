@@ -2,7 +2,10 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::sync::Arc;
 
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -27,8 +30,16 @@ async fn http_search_returns_hits_and_cursor() {
         let mut f = File::create(&in_path).unwrap();
         // _id обязателен? В твоём writer ext_id читается из "_id". Пусть будет.
         // Два текста, один содержит "игра".
-        writeln!(f, r#"{{"_id":"1","text":{{"title":"Пример","body":"эта игра очень хороша"}}}}"#).unwrap();
-        writeln!(f, r#"{{"_id":"2","text":{{"title":"Демо","body":"ничего не найдено"}}}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"_id":"1","text":{{"title":"Пример","body":"эта игра очень хороша"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"_id":"2","text":{{"title":"Демо","body":"ничего не найдено"}}}}"#
+        )
+        .unwrap();
     }
 
     // Собираем сегмент: JsonSegmentWriter::write_segment(...)
@@ -63,16 +74,25 @@ async fn http_search_returns_hits_and_cursor() {
     let response = app.clone().oneshot(request).await.expect("response");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
     // 5) Проверяем базовые инварианты ответа
     // hits есть и не пустой
-    let hits = v.get("hits").and_then(|h| h.as_array()).cloned().unwrap_or_default();
+    let hits = v
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .cloned()
+        .unwrap_or_default();
     assert!(!hits.is_empty(), "expected non-empty hits, got: {v}");
 
     // cursor присутствует
-    assert!(v.get("cursor").is_some(), "expected cursor in response, got: {v}");
+    assert!(
+        v.get("cursor").is_some(),
+        "expected cursor in response, got: {v}"
+    );
 
     // Дополнительно убедимся, что ext_id/doc_id приходят
     let first = hits.first().unwrap();

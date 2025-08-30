@@ -1,13 +1,15 @@
 // broker/src/ingest/compactor.rs
-use tokio::{fs, io::AsyncReadExt};
 use std::path::PathBuf;
+use tokio::{fs, io::AsyncReadExt};
 
 pub struct Compactor {
     pub out_dir: PathBuf,
 }
 
 impl Compactor {
-    pub fn new(out_dir: PathBuf) -> Self { Self { out_dir } }
+    pub fn new(out_dir: PathBuf) -> Self {
+        Self { out_dir }
+    }
 
     pub async fn wal_to_segment(&self, wal_path: &str) -> anyhow::Result<String> {
         // Читаем WAL jsonl и вызываем существующий сборщик сегментов (или внутренний API)

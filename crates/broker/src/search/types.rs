@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PageIn {
@@ -17,7 +20,6 @@ pub struct SearchLimits {
     #[serde(default)]
     pub max_candidates: Option<u64>,
 }
-
 
 impl SearchLimits {
     /// Относительный бюджет времени на запрос.
@@ -53,18 +55,12 @@ pub struct SearchCursor {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Hit {
-    pub ext_id: String,
-    pub doc_id: u32,
-    pub matched_field: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SearchMetrics {
     pub candidates_total: u64,
     pub time_to_first_hit_ms: u64,
     pub deadline_hit: bool,
     pub saturated_sem: u64,
+    pub dedup_dropped: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -72,4 +68,12 @@ pub struct SearchResponse {
     pub hits: Vec<Hit>,
     pub cursor: Option<SearchCursor>,
     pub metrics: SearchMetrics,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Hit {
+    pub ext_id: String,
+    pub doc_id: u32,
+    pub matched_field: String,
+    pub preview: String,
 }

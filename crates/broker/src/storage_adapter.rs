@@ -1,194 +1,228 @@
-use tokio_util::sync::CancellationToken;
+use anyhow::Result;
 use regex::Regex;
-use tracing::{debug, warn};
+use std::path::Path;
 
-use grepzilla_segment::SegmentReader;
+use grepzilla_segment::common::preview::{build_preview, PreviewOpts};
 use grepzilla_segment::gram::{required_grams_from_wildcard, BooleanOp};
-use grepzilla_segment::normalizer::normalize;
 use grepzilla_segment::segjson::JsonSegmentReader;
+use grepzilla_segment::v2::reader::BinSegmentReader;
+use grepzilla_segment::SegmentReader;
 
 use crate::search::executor::{SegmentTaskInput, SegmentTaskOutput};
 use crate::search::types::Hit;
 
-/// Экранируем regex-метасимволы, оставляя * и ? (wildcard обрабатываем ниже).
-fn escape_regex_meta_keep_wildcards(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for ch in s.chars() {
-        match ch {
-            '.' | '+' | '(' | ')' | '|' | '{' | '}' | '[' | ']' | '^' | '$' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            '*' | '?' => out.push(ch),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// Конвертация wildcard → regex над уже нормализованной строкой.
-/// "*" -> ".*", "?" -> ".", без якорей (подстрочный матч).
-fn wildcard_norm_to_regex(norm_wildcard: &str) -> anyhow::Result<Regex> {
-    let escaped = escape_regex_meta_keep_wildcards(norm_wildcard);
-    let mut pat = String::with_capacity(escaped.len() + 8);
-    for ch in escaped.chars() {
-        match ch {
-            '*' => pat.push_str(".*"),
-            '?' => pat.push('.'),
-            _ => pat.push(ch),
-        }
-    }
-    Ok(Regex::new(&pat)?)
-}
-
 pub async fn search_one_segment(
     input: SegmentTaskInput,
-    ct: CancellationToken,
-) -> anyhow::Result<SegmentTaskOutput> {
-    if ct.is_cancelled() {
-        anyhow::bail!("cancelled");
-    }
+    _ctok: tokio_util::sync::CancellationToken,
+) -> Result<SegmentTaskOutput> {
+    // 1) нормализуем wildcard (StoredDoc.fields уже нормализованы)
+    let nq = grepzilla_segment::normalizer::normalize(&input.wildcard);
+    let grams = required_grams_from_wildcard(&nq)?;
+    let rx = wildcard_to_regex_case_insensitive(&nq)?;
 
-    // 1) Обязательные триграммы из wildcard (внутри есть normalize)
-    let req_grams = match required_grams_from_wildcard(&input.wildcard) {
-        Ok(g) => g,
-        Err(e) => {
-            warn!(error=?e, wildcard=%input.wildcard, "weak or invalid wildcard; skipping segment");
-            return Ok(SegmentTaskOutput {
-                seg_path: input.seg_path,
-                hits: Vec::new(),
-                last_docid: input.cursor_docid,
-                candidates: 0,
-            });
-        }
-    };
-
-    // 2) Открываем сегмент
-    let seg_path = input.seg_path.clone();
-    let field_opt: Option<&str> = if input.field.is_empty() { None } else { Some(input.field.as_str()) };
-
-    debug!(seg=%seg_path, "about to open segment");
-    let reader = match JsonSegmentReader::open_segment(&seg_path) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(seg=%seg_path, error=?e, "failed to open segment");
-            return Ok(SegmentTaskOutput {
-                seg_path: input.seg_path,
-                hits: vec![],
-                last_docid: input.cursor_docid,
-                candidates: 0,
-            });
-        }
-    };
-    debug!(seg=%seg_path, "segment opened OK");
-
-    if ct.is_cancelled() {
-        anyhow::bail!("cancelled");
-    }
-
-    // 3) Префильтр по триграммам (+ маска поля)
-    let bm_candidates = reader.prefilter(BooleanOp::And, &req_grams, field_opt)?;
-    debug!(
-        seg=%seg_path,
-        grams=%req_grams.len(),
-        candidates=%bm_candidates.cardinality(),
-        field=?field_opt,
-        "prefilter done"
-    );
-
-    // 4) Regex по НОРМАЛИЗОВАННОМУ wildcard (индекс хранит нормализованные строки)
-    let norm_wc = normalize(&input.wildcard);
-    let re = match wildcard_norm_to_regex(&norm_wc) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(error=?e, wildcard=%input.wildcard, norm=%norm_wc, "failed to build regex; skipping segment");
-            return Ok(SegmentTaskOutput {
-                seg_path: input.seg_path,
-                hits: Vec::new(),
-                last_docid: input.cursor_docid,
-                candidates: 0,
-            });
-        }
-    };
-
-    // 5) Перебор кандидатов c учётом курсора и лимита
-    let max_candidates = input.max_candidates;
     let mut hits: Vec<Hit> = Vec::new();
-    let mut candidates_seen: u64 = 0;
-    let mut last_docid: Option<u64> = input.cursor_docid;
+    let mut candidates: u64 = 0;
 
-    for doc_id in bm_candidates.iter() {
-        if ct.is_cancelled() {
-            anyhow::bail!("cancelled");
-        }
-        if let Some(cur) = input.cursor_docid {
-            if (doc_id as u64) <= cur {
-                continue;
-            }
-        }
+    let is_v2 = Path::new(&input.seg_path).join("meta.bin").exists();
+    if is_v2 {
+        // -------- V2 ----------
+        let reader = BinSegmentReader::open_segment(&input.seg_path)?;
+        let bm = reader.prefilter(BooleanOp::And, &grams, non_empty(&input.field))?;
 
-        candidates_seen += 1;
-        last_docid = Some(doc_id as u64);
-        if candidates_seen > max_candidates {
-            break;
-        }
+        // old -> .take(2_000), прогреть OnceCell по первым ~2k id после курсора (для быстрого TTFH)
+        // new -> prefetch = page_size * 4 (cap 5000)
+        let warm_cap = (input.page_size.saturating_mul(4)).min(5_000);
+        let warm: Vec<u32> = bm
+            .iter()
+            .skip(skip_from_cursor(input.cursor_docid))
+            .take(warm_cap)
+            .collect();
+        reader.prefetch_docs(warm.into_iter());
 
-        if let Some(doc) = reader.get_doc(doc_id) {
-            // matched? и какое имя поля считать matched_field
-            let (is_match, matched_field_name): (bool, String) = match field_opt {
-                Some(f) => {
-                    let ok = doc.fields.get(f).map(|t| re.is_match(t)).unwrap_or(false);
-                    (ok, f.to_string())
+        for doc_id in bm.iter() {
+            // пропускаем только если курсор есть и doc_id <= last_docid
+            if let Some(cur) = input.cursor_docid {
+                if (doc_id as u64) <= cur {
+                    continue;
                 }
-                None => {
-                    // ищем по всем строковым полям и берём первое совпавшее имя
-                    let mut found: Option<String> = None;
-                    for (name, text) in &doc.fields {
-                        if re.is_match(text) {
-                            found = Some(name.clone());
-                            break;
+            }
+            candidates += 1;
+            if candidates > input.max_candidates {
+                break;
+            }
+
+            if let Some(doc) = reader.get_doc(doc_id) {
+                // verify: либо заданное поле, либо первое совпавшее
+                let (matched, matched_field) = match non_empty(&input.field) {
+                    Some(f) => {
+                        let ok = doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false);
+                        (ok, ok.then(|| f.to_string()))
+                    }
+                    None => {
+                        if let Some((k, _)) = doc.fields.iter().find(|(_, t)| rx.is_match(t)) {
+                            (true, Some(k.clone()))
+                        } else {
+                            (false, None)
                         }
                     }
-                    (found.is_some(), found.unwrap_or_default())
+                };
+                if !matched {
+                    continue;
                 }
-            };
 
-            if !is_match {
-                continue;
+                // NEW: превью — сперва из matched_field с подсветкой regex’ом;
+                // если вдруг поля нет (теоретически), fallback на общий build_preview.
+                let preview = if let Some(ref mf) = matched_field {
+                    if let Some(txt) = doc.fields.get(mf) {
+                        build_snippet(&rx, txt, 180)
+                    } else {
+                        build_preview(
+                            doc,
+                            PreviewOpts {
+                                preferred_fields: &["text.title", "text.body", "title", "body"],
+                                max_len: 180,
+                                highlight_needle: grams.first().map(|s| s.as_str()),
+                            },
+                        )
+                    }
+                } else {
+                    build_preview(
+                        doc,
+                        PreviewOpts {
+                            preferred_fields: &["text.title", "text.body", "title", "body"],
+                            max_len: 180,
+                            highlight_needle: grams.first().map(|s| s.as_str()),
+                        },
+                    )
+                };
+
+                hits.push(Hit {
+                    ext_id: doc.ext_id.clone(),
+                    doc_id: doc.doc_id,
+                    matched_field: matched_field.clone().unwrap_or_default(),
+                    preview,
+                });
+
+                if hits.len() >= 1024 {
+                    break;
+                } // локальный батч для пагинатора
+            }
+        }
+
+        Ok(SegmentTaskOutput {
+            seg_path: input.seg_path,
+            last_docid: hits.last().map(|h| h.doc_id as u64),
+            candidates,
+            hits,
+        })
+    } else {
+        // -------- V1 ----------
+        let reader = JsonSegmentReader::open_segment(&input.seg_path)?;
+        let bm = reader.prefilter(BooleanOp::And, &grams, non_empty(&input.field))?;
+
+        for doc_id in bm.iter() {
+            // пропускаем только если курсор есть и doc_id <= last_docid
+            if let Some(cur) = input.cursor_docid {
+                if (doc_id as u64) <= cur {
+                    continue;
+                }
+            }
+            candidates += 1;
+            if candidates > input.max_candidates {
+                break;
             }
 
-            // (сниппет можем строить на будущее — пока в Hit его нет)
-            // let snippet_src = doc.fields.get(&matched_field_name).cloned()
-            //     .or_else(|| doc.fields.get("text.body").cloned())
-            //     .or_else(|| doc.fields.get("text.title").cloned())
-            //     .unwrap_or_default();
-            // let _preview = build_snippet(&re, &snippet_src, 80);
+            if let Some(doc) = reader.get_doc(doc_id) {
+                let (matched, matched_field) = match non_empty(&input.field) {
+                    Some(f) => {
+                        let ok = doc.fields.get(f).map(|t| rx.is_match(t)).unwrap_or(false);
+                        (ok, ok.then(|| f.to_string()))
+                    }
+                    None => {
+                        if let Some((k, _)) = doc.fields.iter().find(|(_, t)| rx.is_match(t)) {
+                            (true, Some(k.clone()))
+                        } else {
+                            (false, None)
+                        }
+                    }
+                };
+                if !matched {
+                    continue;
+                }
 
-            hits.push(Hit {
-                ext_id: doc.ext_id.clone(),
-                doc_id,
-                matched_field: matched_field_name,
-            });
+                // NEW: тот же подход к превью
+                let preview = if let Some(ref mf) = matched_field {
+                    if let Some(txt) = doc.fields.get(mf) {
+                        build_snippet(&rx, txt, 180)
+                    } else {
+                        build_preview(
+                            doc,
+                            PreviewOpts {
+                                preferred_fields: &["text.title", "text.body", "title", "body"],
+                                max_len: 180,
+                                highlight_needle: grams.first().map(|s| s.as_str()),
+                            },
+                        )
+                    }
+                } else {
+                    build_preview(
+                        doc,
+                        PreviewOpts {
+                            preferred_fields: &["text.title", "text.body", "title", "body"],
+                            max_len: 180,
+                            highlight_needle: grams.first().map(|s| s.as_str()),
+                        },
+                    )
+                };
+
+                hits.push(Hit {
+                    ext_id: doc.ext_id.clone(),
+                    doc_id: doc.doc_id,
+                    matched_field: matched_field.unwrap_or_default(),
+                    preview,
+                });
+
+                if hits.len() >= 1024 {
+                    break;
+                }
+            }
         }
-    }
 
-    Ok(SegmentTaskOutput {
-        seg_path: input.seg_path,
-        hits,
-        last_docid,
-        candidates: candidates_seen,
-    })
+        Ok(SegmentTaskOutput {
+            seg_path: input.seg_path,
+            last_docid: hits.last().map(|h| h.doc_id as u64),
+            candidates,
+            hits,
+        })
+    }
 }
 
-// приватный хелпер (на будущее: если будет поле preview)
+#[inline]
+fn non_empty(s: &str) -> Option<&str> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+#[inline]
+fn skip_from_cursor(cur: Option<u64>) -> usize {
+    match cur {
+        Some(v) if v > 0 => v as usize,
+        _ => 0,
+    }
+}
+
+/// Строит сниппет вокруг первого regex-совпадения в `text`,
+/// с квадратными скобками для подсветки. Если совпадения нет — усечение.
 fn build_snippet(rx: &Regex, text: &str, window: usize) -> String {
     if let Some(m) = rx.find(text) {
         let start = m.start();
         let end = m.end();
-        let ctx = window.saturating_sub((end - start).min(window) + 2) / 2;
+        let ctx = window.saturating_sub(end - start + 2) / 2; // «…» по краям
         let from = start.saturating_sub(ctx);
         let to = (end + ctx).min(text.len());
-
         let mut out = String::new();
         if from > 0 {
             out.push('…');
@@ -202,9 +236,29 @@ fn build_snippet(rx: &Regex, text: &str, window: usize) -> String {
             out.push('…');
         }
         out
-    } else if text.len() > window {
-        format!("{}…", &text[..window])
     } else {
-        text.to_string()
+        if text.len() > window {
+            format!("{}…", &text[..window])
+        } else {
+            text.to_string()
+        }
     }
+}
+
+fn wildcard_to_regex_case_insensitive(pat: &str) -> anyhow::Result<Regex> {
+    // (?si): dotall + case-insensitive
+    let mut rx = String::from("(?si)");
+    for ch in pat.chars() {
+        match ch {
+            '*' => rx.push_str(".*"),
+            '?' => rx.push('.'),
+            c => {
+                if "\\.^$|()[]{}+*?".contains(c) {
+                    rx.push('\\');
+                }
+                rx.push(c);
+            }
+        }
+    }
+    Ok(Regex::new(&rx)?)
 }

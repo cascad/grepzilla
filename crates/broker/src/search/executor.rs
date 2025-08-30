@@ -14,6 +14,7 @@ pub struct SegmentTaskInput {
     pub field: String,
     pub cursor_docid: Option<u64>,
     pub max_candidates: u64,
+    pub page_size: usize,
 }
 
 pub struct SegmentTaskOutput {

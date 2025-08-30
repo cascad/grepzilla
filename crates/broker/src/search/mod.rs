@@ -49,6 +49,16 @@ impl SearchCoordinator {
                     .collect()
             };
 
+        // NEW: приоритизируем свежие гены внутри шарда
+        let mut selected = selected;
+        selected.sort_by(|a, b| {
+            use std::cmp::Ordering::*;
+            match a.shard.cmp(&b.shard) {
+                Equal => b.gen.cmp(&a.gen), // DESC по gen!
+                other => other,
+            }
+        });
+
         let limits = req.limits.clone().unwrap_or(SearchLimits {
             parallelism: None,
             deadline_ms: None,
@@ -68,6 +78,8 @@ impl SearchCoordinator {
                 field: req.field.clone().unwrap_or_default(),
                 cursor_docid: extract_last_docid(&req.page.cursor, &s.path),
                 max_candidates: limits.max_candidates.unwrap_or(200_000),
+                // NEW:
+                page_size: req.page.size,
             })
             .collect::<Vec<_>>();
 
@@ -83,7 +95,8 @@ impl SearchCoordinator {
             .run_all(ct.clone(), tasks, search_fn, req.page.size, deadline)
             .await;
 
-        let (hits, mut cursor, candidates_total) = Paginator::merge(parts, req.page.size);
+        let (hits, mut cursor, candidates_total, dedup_dropped) =
+            Paginator::merge(parts, req.page.size);
         let ttfh = if hits.is_empty() {
             0
         } else {
@@ -102,6 +115,7 @@ impl SearchCoordinator {
                 time_to_first_hit_ms: ttfh,
                 deadline_hit,
                 saturated_sem: saturated_sem as u64,
+                dedup_dropped,
             },
         })
     }
