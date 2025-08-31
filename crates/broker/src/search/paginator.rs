@@ -1,49 +1,57 @@
+// crates/broker/src/search/paginator.rs
+
 use std::collections::{HashMap, HashSet};
 
 use crate::search::executor::SegmentTaskOutput;
 use crate::search::types::{Hit, PerSegPos, SearchCursor};
 
 /// Простой пагинатор: склеивает результаты по сегментам в порядке их прихода,
-/// набирает первую страницу `page_size`, строит курсор per-seg и считает метрики.
-/// Дедуп по ext_id: если документ встречается в нескольких сегментах, берём первый.
+/// набирает первую страницу `page_size`, и строит курсор per-seg.
+/// Также агрегирует метрики по сегментам.
 pub struct Paginator;
 
 impl Paginator {
-    /// Возвращает: (hits_page, cursor, candidates_total, dedup_dropped)
+    /// Возвращает:
+    ///  - hits_page
+    ///  - cursor
+    ///  - candidates_total
+    ///  - dedup_dropped
+    ///  - totals: (prefilter_ms, verify_ms, prefetch_ms, warmed_docs)
     pub fn merge(
         parts: Vec<SegmentTaskOutput>,
         page_size: usize,
-    ) -> (Vec<Hit>, SearchCursor, u64, u64, u64, u64, u64, u64) {
+    ) -> (Vec<Hit>, SearchCursor, u64, u64, (u64, u64, u64, u64)) {
         let mut hits: Vec<Hit> = Vec::new();
         let mut per_seg: HashMap<String, PerSegPos> = HashMap::new();
         let mut candidates_total: u64 = 0;
 
-        // NEW: агрегированные метрики
-        let mut agg_prefilter_ms = 0u64;
-        let mut agg_verify_ms = 0u64;
-        let mut agg_prefetch_ms = 0u64;
-        let mut agg_warmed_docs = 0u64;
+        // агрегированные метрики
+        let mut prefilter_ms_total = 0u64;
+        let mut verify_ms_total = 0u64;
+        let mut prefetch_ms_total = 0u64;
+        let mut warmed_docs_total = 0u64;
 
         // дедуп по ext_id
         let mut seen_ext: HashSet<String> = HashSet::new();
-        let mut dedup_dropped = 0u64;
+        let mut dedup_dropped: u64 = 0;
 
         for p in parts.into_iter() {
             candidates_total += p.candidates;
-            agg_prefilter_ms += p.prefilter_ms;
-            agg_verify_ms += p.verify_ms;
-            agg_prefetch_ms += p.prefetch_ms;
-            agg_warmed_docs += p.warmed_docs;
+            prefilter_ms_total += p.prefilter_ms;
+            verify_ms_total += p.verify_ms;
+            prefetch_ms_total += p.prefetch_ms;
+            warmed_docs_total += p.warmed_docs;
 
+            // набираем хиты до page_size, дедуп по ext_id
             for h in p.hits {
                 if hits.len() >= page_size {
                     break;
                 }
-                if seen_ext.insert(h.ext_id.clone()) {
-                    hits.push(h);
-                } else {
+                if !seen_ext.insert(h.ext_id.clone()) {
                     dedup_dropped += 1;
+                    continue;
                 }
+                hits.push(h);
             }
 
             per_seg.insert(
@@ -64,10 +72,7 @@ impl Paginator {
             cursor,
             candidates_total,
             dedup_dropped,
-            agg_prefilter_ms,
-            agg_verify_ms,
-            agg_prefetch_ms,
-            agg_warmed_docs,
+            (prefilter_ms_total, verify_ms_total, prefetch_ms_total, warmed_docs_total),
         )
     }
 }

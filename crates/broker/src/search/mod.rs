@@ -1,3 +1,5 @@
+// crates/broker/src/search/mod.rs
+
 pub mod executor;
 pub mod paginator;
 pub mod types;
@@ -6,11 +8,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::manifest::{ManifestStore, SegRef};
-use crate::search::executor::{ParallelExecutor, SegmentTaskInput, SegmentTaskOutput};
+use crate::search::executor::{ParallelExecutor, SegmentTaskInput};
 use crate::search::paginator::Paginator;
 use crate::search::types::*;
-
-use grepzilla_segment::normalizer::normalize;
 use grepzilla_segment::verify::{EnvVerifyFactory, VerifyFactory};
 
 pub struct SearchCoordinator {
@@ -33,18 +33,15 @@ impl SearchCoordinator {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn with_verify_factory(mut self, vf: Arc<dyn VerifyFactory>) -> Self {
-        self.verify_factory = vf;
-        self
-    }
-
     pub async fn handle(&self, req: SearchRequest) -> anyhow::Result<SearchResponse> {
         let start = std::time::Instant::now();
 
-        // выбрать сегменты (shards → manifest; иначе — segments из запроса)
+        // 0) Компилируем движок верификации один раз на весь запрос
+        let eng = self.verify_factory.compile(&req.wildcard)?;
+
+        // 1) Выбираем сегменты (shards → manifest; иначе — segments из запроса)
         let mut pin_gen = std::collections::HashMap::new();
-        let mut selected: Vec<SegRef> =
+        let selected: Vec<SegRef> =
             if let (Some(store), Some(shards)) = (&self.manifest, req.shards.as_ref()) {
                 let (segs, pin) = store.resolve(shards).await?;
                 pin_gen = pin;
@@ -60,19 +57,14 @@ impl SearchCoordinator {
                     .collect()
             };
 
-        // приоритизируем свежие гены внутри шарда
-        selected.sort_by(|a, b| {
-            use std::cmp::Ordering::*;
-            match a.shard.cmp(&b.shard) {
-                Equal => b.gen.cmp(&a.gen), // DESC по gen
-                other => other,
-            }
+        // 2) Приоритизируем свежие гены внутри шарда
+        let mut selected = selected;
+        selected.sort_by(|a, b| match a.shard.cmp(&b.shard) {
+            std::cmp::Ordering::Equal => b.gen.cmp(&a.gen), // DESC по gen
+            other => other,
         });
 
-        // Скомпилируем VerifyEngine ОДИН РАЗ на весь запрос
-        let normalized_wc = normalize(&req.wildcard);
-        let verify_engine = self.verify_factory.compile(&normalized_wc)?;
-
+        // 3) Лимиты/параллелизм
         let limits = req.limits.clone().unwrap_or(SearchLimits {
             parallelism: None,
             deadline_ms: None,
@@ -84,6 +76,7 @@ impl SearchCoordinator {
             .max(1);
         let executor = ParallelExecutor::new(parallelism);
 
+        // 4) Формируем таски (каждому даём verify_engine: Arc<dyn VerifyEngine>)
         let tasks = selected
             .iter()
             .map(|s| SegmentTaskInput {
@@ -93,36 +86,26 @@ impl SearchCoordinator {
                 cursor_docid: extract_last_docid(&req.page.cursor, &s.path),
                 max_candidates: limits.max_candidates.unwrap_or(200_000),
                 page_size: req.page.size,
-                verify_engine: verify_engine.clone(), // прокидываем движок в таск
+                verify_engine: eng.clone(),
             })
             .collect::<Vec<_>>();
 
         let ct = CancellationToken::new();
         let deadline = limits.deadline_duration();
 
-        // замыкание ничего не захватывает; движок берём из input.verify_engine
+        // 5) Исполнение: search_one_segment читает движок из input.verify_engine
         let search_fn = |input: SegmentTaskInput, ctok: CancellationToken| async move {
-            let eng = input.verify_engine.clone();
-            let out = crate::storage_adapter::search_one_segment(input, eng, ctok).await?;
-            Ok::<SegmentTaskOutput, anyhow::Error>(out)
+            let out = crate::storage_adapter::search_one_segment(input, ctok).await?;
+            Ok::<_, anyhow::Error>(out)
         };
 
         let (parts, deadline_hit, saturated_sem) = executor
             .run_all(ct.clone(), tasks, search_fn, req.page.size, deadline)
             .await;
 
-        // merge + дедуп
-
-        let (
-            hits,
-            mut cursor,
-            candidates_total,
-            dedup_dropped,
-            prefilter_ms,
-            verify_ms,
-            prefetch_ms,
-            warmed_docs,
-        ) = Paginator::merge(parts, req.page.size);
+        // 6) Сшиваем и агрегируем метрики
+        let (hits, mut cursor, candidates_total, dedup_dropped, totals) =
+            Paginator::merge(parts, req.page.size);
 
         let ttfh = if hits.is_empty() {
             0
@@ -134,6 +117,8 @@ impl SearchCoordinator {
             cursor.pin_gen = Some(pin_gen);
         }
 
+        let (prefilter_ms_total, verify_ms_total, prefetch_ms_total, warmed_docs_total) = totals;
+
         Ok(SearchResponse {
             hits,
             cursor: Some(cursor),
@@ -143,10 +128,10 @@ impl SearchCoordinator {
                 deadline_hit,
                 saturated_sem: saturated_sem as u64,
                 dedup_dropped,
-                prefilter_ms: Some(prefilter_ms),
-                verify_ms: Some(verify_ms),
-                prefetch_ms: Some(prefetch_ms),
-                warmed_docs: Some(warmed_docs),
+                prefilter_ms: Some(prefilter_ms_total),
+                verify_ms: Some(verify_ms_total),
+                prefetch_ms: Some(prefetch_ms_total),
+                warmed_docs: Some(warmed_docs_total),
             },
         })
     }
