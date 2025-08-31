@@ -559,3 +559,5 @@ GZ_VERIFY=pcre2 cargo run -p broker --features engine-pcre2
 cargo run -p broker
 
 --------
+
+D3: Метрики и логирование (prefilter_ms, verify_ms, warmed_docs и т.д., чтобы у нас были красивые профили запросов).

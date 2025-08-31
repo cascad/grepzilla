@@ -27,6 +27,10 @@ criterion = "0.5"
 name = "v2_getdoc_bench"
 harness = false 
 
+[[bench]]
+name = "preview_bench"
+harness = false
+
 [features]
 default = []
 # Включает альтернативный движок верификации через PCRE2
