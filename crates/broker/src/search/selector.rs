@@ -1,7 +1,7 @@
+use crate::manifest::ManifestStore;
+use crate::search::types::{GenId, SearchRequest, ShardId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::search::manifest::ManifestStore;
-use crate::search::types::{GenId, SearchRequest, ShardId};
 
 pub struct SegmentSelector<S: ManifestStore> {
     pub store: Arc<S>,
@@ -28,8 +28,8 @@ impl<S: ManifestStore> SegmentSelector<S> {
         let mut selected = Vec::new();
         if let Some(shards) = &req.shards {
             for &shard in shards {
-                if let Some(&gen) = pin.get(&shard) {
-                    let mut segs = self.store.segments_for(shard, gen).await?;
+                if let Some(generation) = pin.get(&shard) {
+                    let mut segs = self.store.segments_for(shard, *generation).await?;
                     selected.append(&mut segs);
                 }
             }

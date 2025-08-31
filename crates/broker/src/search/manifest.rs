@@ -37,7 +37,7 @@ impl ManifestStore for FsManifestStore {
     async fn segments_for(&self, shard: ShardId, generation: GenId) -> anyhow::Result<Vec<String>> {
         let f = std::fs::File::open(&self.path)?;
         let m: Manifest = serde_json::from_reader(f)?;
-        let key = format!("{shard}:{gen}");
+        let key = format!("{shard}:{generation}");
         Ok(m.segments.get(&key).cloned().unwrap_or_default())
     }
 }

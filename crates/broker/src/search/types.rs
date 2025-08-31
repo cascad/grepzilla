@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Duration};
+
+pub type ShardId = u64;
+pub type GenId = u64;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PageIn {
