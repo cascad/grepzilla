@@ -1,4 +1,3 @@
-// Файл: crates/broker/src/main.rs
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -7,18 +6,29 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use broker::http_api::{self, AppState};
 use broker::search::SearchCoordinator;
+use broker::config::BrokerConfig;
+use broker::ingest::hot::HotMem;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
 
-    // Пока жёстко: 4 воркера на сегменты. Можно взять из config позже.
-    let coord = Arc::new(SearchCoordinator::new(4));
-    let state = AppState { coord };
+    let cfg = BrokerConfig::from_env();
+
+    // HotMem с ограничением из конфига
+    let hot = HotMem::new().with_cap(cfg.hot_cap);
+
+    let coord = Arc::new(SearchCoordinator::new(cfg.parallelism).with_hot(hot.clone()));
+
+    let state = AppState {
+        coord: coord.clone(),
+        cfg: cfg.clone(),
+        hot,
+    };
 
     let app = http_api::router(state);
 
-    let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+    let addr: SocketAddr = cfg.addr.parse().unwrap_or_else(|_| "0.0.0.0:8080".parse().unwrap());
     tracing::info!(address = %addr, "broker listening");
     println!("=== BROKER START {}", env!("CARGO_PKG_VERSION"));
 

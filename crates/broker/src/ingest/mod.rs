@@ -1,6 +1,9 @@
 // crates/broker/src/ingest/mod.rs
 pub mod compactor;
 pub mod wal;
+pub mod memtable;
+pub mod flusher;
+pub mod hot;
 
 use compactor::Compactor;
 use wal::Wal;

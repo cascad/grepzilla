@@ -1,6 +1,5 @@
 use std::fs::{self, File};
 use std::io::Write;
-use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -10,12 +9,12 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
-use broker::http_api::{router, AppState};
-use broker::search::SearchCoordinator;
-
 // для сборки сегмента
 use grepzilla_segment::segjson::JsonSegmentWriter;
 use grepzilla_segment::SegmentWriter;
+
+mod helpers;
+use helpers::make_router_with_parallelism;
 
 #[tokio::test]
 async fn http_search_returns_hits_and_cursor() {
@@ -48,8 +47,7 @@ async fn http_search_returns_hits_and_cursor() {
         .expect("write segment");
 
     // 2) Собираем приложение с координатором (по варианту 2)
-    let coord = Arc::new(SearchCoordinator::new(4));
-    let app = router(AppState { coord });
+    let app = make_router_with_parallelism(4);
 
     // 3) Готовим HTTP-запрос POST /search
     // ВАЖНО: тело должно соответствовать broker::search::types::SearchRequest

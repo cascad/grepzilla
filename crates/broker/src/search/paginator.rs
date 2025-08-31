@@ -5,18 +5,11 @@ use std::collections::{HashMap, HashSet};
 use crate::search::executor::SegmentTaskOutput;
 use crate::search::types::{Hit, PerSegPos, SearchCursor};
 
-/// Простой пагинатор: склеивает результаты по сегментам в порядке их прихода,
-/// набирает первую страницу `page_size`, и строит курсор per-seg.
-/// Также агрегирует метрики по сегментам.
+const HOT_SEG_NAME: &str = "__hot__"; // ← NEW
+
 pub struct Paginator;
 
 impl Paginator {
-    /// Возвращает:
-    ///  - hits_page
-    ///  - cursor
-    ///  - candidates_total
-    ///  - dedup_dropped
-    ///  - totals: (prefilter_ms, verify_ms, prefetch_ms, warmed_docs)
     pub fn merge(
         parts: Vec<SegmentTaskOutput>,
         page_size: usize,
@@ -54,12 +47,15 @@ impl Paginator {
                 hits.push(h);
             }
 
-            per_seg.insert(
-                p.seg_path.clone(),
-                PerSegPos {
-                    last_docid: p.last_docid.unwrap_or(0),
-                },
-            );
+            // ⬇️ Не кладём служебный hot-сегмент в курсор
+            if p.seg_path != HOT_SEG_NAME {
+                per_seg.insert(
+                    p.seg_path.clone(),
+                    PerSegPos {
+                        last_docid: p.last_docid.unwrap_or(0),
+                    },
+                );
+            }
         }
 
         let cursor = SearchCursor {
@@ -72,12 +68,7 @@ impl Paginator {
             cursor,
             candidates_total,
             dedup_dropped,
-            (
-                prefilter_ms_total,
-                verify_ms_total,
-                prefetch_ms_total,
-                warmed_docs_total,
-            ),
+            (prefilter_ms_total, verify_ms_total, prefetch_ms_total, warmed_docs_total),
         )
     }
 }

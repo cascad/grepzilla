@@ -2,16 +2,15 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use std::sync::Arc;
 use tower::ServiceExt;
+
+mod helpers;
+use helpers::make_router_with_parallelism;
 
 #[tokio::test]
 async fn healthz_ok() {
     // минимальный app
-    let coord = broker::search::SearchCoordinator::new(2);
-    let app = broker::http_api::router(broker::http_api::AppState {
-        coord: Arc::new(coord),
-    });
+    let app = make_router_with_parallelism(2);
 
     let resp = app
         .oneshot(

@@ -8,15 +8,18 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::manifest::{ManifestStore, SegRef};
-use crate::search::executor::{ParallelExecutor, SegmentTaskInput};
+use crate::search::executor::{ParallelExecutor, SegmentTaskInput, SegmentTaskOutput};
 use crate::search::paginator::Paginator;
 use crate::search::types::*;
 use grepzilla_segment::verify::{EnvVerifyFactory, VerifyFactory};
+use crate::ingest::hot::HotMem;
+use grepzilla_segment::common::preview::{build_preview, PreviewOpts};
 
 pub struct SearchCoordinator {
     default_parallelism: usize,
     manifest: Option<Arc<dyn ManifestStore>>,
     verify_factory: Arc<dyn VerifyFactory>,
+    hot: Option<HotMem>, // NEW: горячая область
 }
 
 impl SearchCoordinator {
@@ -25,11 +28,18 @@ impl SearchCoordinator {
             default_parallelism,
             manifest: None,
             verify_factory: Arc::new(EnvVerifyFactory::from_env()),
+            hot: None,
         }
     }
 
     pub fn with_manifest(mut self, store: Arc<dyn ManifestStore>) -> Self {
         self.manifest = Some(store);
+        self
+    }
+
+    /// Прокинуть hot-memory (по желанию).
+    pub fn with_hot(mut self, hot: HotMem) -> Self {
+        self.hot = Some(hot);
         self
     }
 
@@ -99,9 +109,68 @@ impl SearchCoordinator {
             Ok::<_, anyhow::Error>(out)
         };
 
-        let (parts, deadline_hit, saturated_sem) = executor
+        let (mut parts, deadline_hit, saturated_sem) = executor
             .run_all(ct.clone(), tasks, search_fn, req.page.size, deadline)
             .await;
+
+        // 5.5) Поиск по горячей памяти (если настроен)
+        if let Some(hot) = &self.hot {
+            let mut hot_hits: Vec<Hit> = Vec::new();
+            let mut candidates: u64 = 0;
+            let mut verify_ms = 0u64;
+
+            let preferred = ["text.title", "text.body", "title", "body"];
+
+            for doc in hot.snapshot().into_iter() {
+                let tv0 = std::time::Instant::now();
+                let matched_field = match req.field.as_deref() {
+                    Some(f) if !f.is_empty() => {
+                        doc.fields.get(f).and_then(|t| if eng.is_match(t) { Some(f.to_string()) } else { None })
+                    }
+                    _ => {
+                        doc.fields
+                            .iter()
+                            .find(|(_, t)| eng.is_match(t))
+                            .map(|(k, _)| k.clone())
+                    }
+                };
+                verify_ms += tv0.elapsed().as_millis() as u64;
+
+                if let Some(mf) = matched_field {
+                    let preview = build_preview(
+                        &doc,
+                        PreviewOpts {
+                            preferred_fields: &preferred,
+                            max_len: 180,
+                            highlight_needle: None, // движок уже проверил матч
+                        },
+                    );
+
+                    hot_hits.push(Hit {
+                        ext_id: doc.ext_id.clone(),
+                        doc_id: doc.doc_id,
+                        matched_field: mf,
+                        preview,
+                    });
+                    candidates += 1;
+
+                    if hot_hits.len() >= req.page.size {
+                        break;
+                    }
+                }
+            }
+
+            parts.push(SegmentTaskOutput {
+                seg_path: "__hot__".to_string(),
+                last_docid: hot_hits.last().map(|h| h.doc_id as u64),
+                candidates,
+                hits: hot_hits,
+                prefilter_ms: 0,
+                verify_ms,
+                prefetch_ms: 0,
+                warmed_docs: 0,
+            });
+        }
 
         // 6) Сшиваем и агрегируем метрики
         let (hits, mut cursor, candidates_total, dedup_dropped, totals) =

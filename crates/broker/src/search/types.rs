@@ -54,7 +54,7 @@ pub struct PerSegPos {
 #[serde(rename_all = "snake_case")]
 pub struct SearchCursor {
     pub per_seg: HashMap<String, PerSegPos>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_gen: Option<HashMap<u64, u64>>, // shard -> gen
 }
 

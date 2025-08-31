@@ -2,9 +2,11 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
+
+mod helpers;
+use helpers::make_router_with_parallelism;
 
 #[tokio::test]
 async fn manifest_404_for_unknown_shard() {
@@ -21,10 +23,7 @@ async fn manifest_404_for_unknown_shard() {
     .unwrap();
     std::env::set_var("GZ_MANIFEST", manifest_path.to_string_lossy().to_string());
 
-    let coord = broker::search::SearchCoordinator::new(2);
-    let app = broker::http_api::router(broker::http_api::AppState {
-        coord: Arc::new(coord),
-    });
+    let app = make_router_with_parallelism(2);
 
     let resp = app
         .oneshot(

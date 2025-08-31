@@ -31,6 +31,9 @@ pub async fn search_one_segment(
     let mut prefetch_ms = 0u64;
     let mut warmed_docs = 0u64;
 
+    // Будем отслеживать последний реально просмотренный doc_id
+    let mut last_scanned: Option<u32> = None;
+
     let is_v2 = Path::new(&input.seg_path).join("meta.bin").exists();
     if is_v2 {
         // -------- V2 ----------
@@ -58,6 +61,10 @@ pub async fn search_one_segment(
                     continue;
                 }
             }
+
+            // отметим, что этот doc действительно просмотрен
+            last_scanned = Some(doc_id);
+
             candidates += 1;
             if candidates > input.max_candidates {
                 break;
@@ -144,6 +151,10 @@ pub async fn search_one_segment(
                     continue;
                 }
             }
+
+            // отметим просмотренный doc
+            last_scanned = Some(doc_id);
+
             candidates += 1;
             if candidates > input.max_candidates {
                 break;
@@ -230,9 +241,15 @@ pub async fn search_one_segment(
         }
     }
 
+    // Если что-то просмотрели — last_scanned; иначе вернём исходный курсор (или 0)
+    let final_last = last_scanned
+        .map(|d| d as u64)
+        .or(input.cursor_docid)
+        .unwrap_or(0);
+
     Ok(SegmentTaskOutput {
         seg_path: input.seg_path,
-        last_docid: hits.last().map(|h| h.doc_id as u64),
+        last_docid: Some(final_last),
         candidates,
         hits,
         prefilter_ms,

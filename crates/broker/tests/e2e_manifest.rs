@@ -3,9 +3,12 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use std::{fs, sync::Arc};
+use std::fs;
 use tempfile::tempdir;
 use tower::ServiceExt;
+
+mod helpers;
+use helpers::make_router_with_parallelism;
 
 #[tokio::test]
 async fn manifest_get_ok() {
@@ -25,11 +28,7 @@ async fn manifest_get_ok() {
     // Пропишем путь через переменную окружения, как делает http_api::get_manifest
     std::env::set_var("GZ_MANIFEST", manifest_path.to_string_lossy().to_string());
 
-    // 2) Поднимем минимальный app
-    let coord = broker::search::SearchCoordinator::new(2);
-    let app = broker::http_api::router(broker::http_api::AppState {
-        coord: Arc::new(coord),
-    });
+    let app = make_router_with_parallelism(2);
 
     // 3) Запрос
     let resp = app

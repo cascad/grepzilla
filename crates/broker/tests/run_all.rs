@@ -1,13 +1,14 @@
-use std::{fs::File, io::Write, sync::Arc};
+use std::{fs::File, io::Write};
 
 use axum::{http::Request, Router};
-use broker::http_api::{router as make_router, AppState};
-use broker::search::SearchCoordinator;
 use http_body_util::BodyExt; // BodyExt::collect()
 use tower::ServiceExt;
 
 use grepzilla_segment::v2::writer::BinSegmentWriter;
 use grepzilla_segment::SegmentWriter;
+
+mod helpers;
+use helpers::make_router_with_parallelism;
 
 // ---------- helpers ----------
 
@@ -23,12 +24,6 @@ fn build_v2_segment(dir: &std::path::Path, jsonl: &std::path::Path) {
     BinSegmentWriter::default()
         .write_segment(jsonl.to_str().unwrap(), dir.to_str().unwrap())
         .unwrap();
-}
-
-fn make_router_with_default_parallelism(p: usize) -> Router {
-    make_router(AppState {
-        coord: Arc::new(SearchCoordinator::new(p)),
-    })
 }
 
 fn write_manifest_exact(tempdir: &std::path::Path, manifest_json: &serde_json::Value) {
@@ -98,7 +93,7 @@ async fn end_to_end_search_single_shard() {
     });
     write_manifest_exact(root, &manifest);
 
-    let app = make_router_with_default_parallelism(2);
+    let app = make_router_with_parallelism(2);
 
     // sanity: GET /manifest/0
     let m = get_json(&app, "/manifest/0").await;
@@ -179,7 +174,7 @@ async fn end_to_end_search_two_shards() {
     });
     write_manifest_exact(root, &manifest);
 
-    let app = make_router_with_default_parallelism(4);
+    let app = make_router_with_parallelism(4);
 
     // sanity: GET /manifest/{0,1}
     let m0 = get_json(&app, "/manifest/0").await;

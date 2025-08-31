@@ -4,16 +4,15 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::json;
-use std::{fs, io::Write, sync::Arc};
+use std::{fs, io::Write};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use broker::{
-    http_api::{self, AppState},
-    search::SearchCoordinator,
-};
 use grepzilla_segment::segjson::JsonSegmentWriter;
 use grepzilla_segment::SegmentWriter;
+
+mod helpers;
+use helpers::make_router_with_parallelism;
 
 #[tokio::test]
 async fn http_search_via_manifest_shards() {
@@ -61,10 +60,7 @@ async fn http_search_via_manifest_shards() {
     std::env::set_var("GZ_MANIFEST", &manifest_path);
 
     // собираем приложение: router() + state
-    let state = AppState {
-        coord: Arc::new(SearchCoordinator::new(4)),
-    };
-    let app = http_api::router(state);
+    let app = make_router_with_parallelism(4);
 
     // запрос только с shards (без segments)
     let body_val = json!({

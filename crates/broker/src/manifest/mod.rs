@@ -93,4 +93,5 @@ impl ManifestUnified {
 pub trait ManifestStore: Send + Sync {
     async fn load(&self) -> Result<ManifestUnified>;
     async fn resolve(&self, shards: &[u64]) -> Result<(Vec<SegRef>, HashMap<u64, u64>)>;
+    async fn append_segment(&self, shard: u64, seg_path: String) -> anyhow::Result<()>;
 }

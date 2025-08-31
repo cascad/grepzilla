@@ -1,7 +1,4 @@
-{
-  "wildcard":"*игра*",
-  "field":"text.body",
-  "shards":[0,1],
-  "page":{"size":5,"cursor":null},
-  "limits":{"parallelism":2,"deadline_ms":1000,"max_candidates":200000}
+﻿{
+  "wildcard": "*игра*",
+  "page": { "size": 10 }
 }
