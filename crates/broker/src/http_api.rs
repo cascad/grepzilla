@@ -28,6 +28,7 @@ struct ManifestShardOut {
 
 pub fn router(state: AppState) -> Router {
     Router::<AppState>::new()
+        .route("/healthz", get(healthz))
         .route("/search", post(search))
         .route("/manifest/:shard", get(get_manifest))
         .with_state(state)
@@ -120,4 +121,8 @@ async fn get_manifest(
 
 fn internal<E: ToString>(e: E) -> (axum::http::StatusCode, String) {
     (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+pub async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
 }

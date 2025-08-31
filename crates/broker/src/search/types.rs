@@ -5,6 +5,7 @@ pub type ShardId = u64;
 pub type GenId = u64;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub struct PageIn {
     pub size: usize,
     #[serde(default)]
@@ -29,6 +30,7 @@ impl SearchLimits {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub struct SearchRequest {
     pub wildcard: String,
     #[serde(default)]
@@ -43,11 +45,13 @@ pub struct SearchRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub struct PerSegPos {
     pub last_docid: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct SearchCursor {
     pub per_seg: HashMap<String, PerSegPos>,
     #[serde(default)]
@@ -55,6 +59,7 @@ pub struct SearchCursor {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub struct SearchMetrics {
     pub candidates_total: u64,
     pub time_to_first_hit_ms: u64,
@@ -63,17 +68,18 @@ pub struct SearchMetrics {
     pub dedup_dropped: u64,
 
     // NEW (optional, агрегированные по всем сегам):
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub prefilter_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub verify_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub prefetch_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub warmed_docs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub struct SearchResponse {
     pub hits: Vec<Hit>,
     pub cursor: Option<SearchCursor>,
@@ -81,6 +87,7 @@ pub struct SearchResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub struct Hit {
     pub ext_id: String,
     pub doc_id: u32,

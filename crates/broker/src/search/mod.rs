@@ -119,6 +119,13 @@ impl SearchCoordinator {
 
         let (prefilter_ms_total, verify_ms_total, prefetch_ms_total, warmed_docs_total) = totals;
 
+        // Если совсем пусто — отдадим null (D6.3). Иначе — суммы.
+        let has_any_metrics = candidates_total > 0
+            || prefilter_ms_total > 0
+            || verify_ms_total > 0
+            || prefetch_ms_total > 0
+            || warmed_docs_total > 0;
+
         Ok(SearchResponse {
             hits,
             cursor: Some(cursor),
@@ -128,10 +135,10 @@ impl SearchCoordinator {
                 deadline_hit,
                 saturated_sem: saturated_sem as u64,
                 dedup_dropped,
-                prefilter_ms: Some(prefilter_ms_total),
-                verify_ms: Some(verify_ms_total),
-                prefetch_ms: Some(prefetch_ms_total),
-                warmed_docs: Some(warmed_docs_total),
+                prefilter_ms: if has_any_metrics { Some(prefilter_ms_total) } else { None },
+                verify_ms:   if has_any_metrics { Some(verify_ms_total)   } else { None },
+                prefetch_ms: if has_any_metrics { Some(prefetch_ms_total) } else { None },
+                warmed_docs: if has_any_metrics { Some(warmed_docs_total) } else { None },
             },
         })
     }

@@ -1,23 +1,23 @@
-# Grepzilla — Hyperscale-ready Full‑Text/Wildcard Engine (README)
+# Grepzilla — Hyperscale-ready Full-Text/Wildcard Engine
 
-> Стартуем с правильной архитектуры (сегменты, префильтр по n‑gram, verify на regex), но сразу имеем **рабочий кусок**, который можно потрогать: сборка сегмента из JSONL и поиск по шаблону `*wildcard*` в одном сегменте.
+> **Grepzilla** — движок полнотекстового поиска по `*подстроке*`/wildcard-шаблонам, с архитектурой под гиперскейл: сегменты, префильтр по n-gram, verify на regex/PCRE2, брокер с курсорами и дедупликацией.
 
 ---
 
 ## TL;DR (как быстро проверить руками)
 
 ```bash
-# Cборка
+# Сборка
 cargo build --release
 
-# Папки и данные
+# Пример данных
 # Файл: examples/data.jsonl
 ./target/release/gzctl build-seg --input examples/data.jsonl --out segments/000001
 
 # Поиск по сегменту
 ./target/release/gzctl search-seg --seg segments/000001 --q "*играет*"
 ./target/release/gzctl search-seg --seg segments/000001 --q "*мяч*" --field text.body
-# Вывод: ext_id\tdoc_id\tpreview
+# Вывод: ext_id	doc_id	preview
 ```
 
 ---
@@ -31,124 +31,207 @@ grepzilla/
 ├─ examples/
 │  └─ data.jsonl
 └─ crates/
-   ├─ grepzilla_segment/       # библиотека: сегмент V1 (JSON), нормализация, n‑gram
-   │  ├─ Cargo.toml
+   ├─ grepzilla_segment/       # библиотека: сегмент V1 (JSON), нормализация, n-gram
    │  └─ src/
    │     ├─ lib.rs
    │     ├─ segjson.rs        # SegmentWriter/Reader (V1: JSON)
-   │     ├─ gram.rs           # 3‑граммы и обязательные граммы из wildcard
+   │     ├─ gram.rs           # 3-граммы и обязательные граммы из wildcard
    │     └─ normalizer.rs
-   └─ gzctl/                   # CLI: build-seg, search-seg
-      ├─ Cargo.toml
+   ├─ gzctl/                   # CLI: build-seg, search-seg
+   │  └─ src/main.rs
+   └─ broker/                  # HTTP API: /search, /manifest/:shard, /healthz
       └─ src/
-         └─ main.rs
+         ├─ http_api.rs
+         └─ search/{executor.rs,paginator.rs,mod.rs,types.rs}
 ```
 
 ---
 
-## Архитектура (high‑level)
+## Архитектура (high-level)
 
-* **Сегменты (immutable)** — минимальная единица хранения/поиска. В V1 — JSON файлы; в V2 → mmap + FST + Roaring‑блоки.
-* **Префильтр** — пересечение Roaring‑битмапов по **обязательным 3‑граммам** (из запроса), опционально с `field mask`.
-* **Verify** — строгая проверка шаблона (wildcard → regex) уже по тексту документа в `DocStore`.
-* **LSM ingest (позже)** — WAL → memtable → маленькие сегменты → компакция в большие.
-* **Шардинг (позже)** — по `(tenant, labels, time)`; брокер парсит запрос, назначает бюджеты, стримит ответы.
-
-Такой разрез даёт: предсказуемый префильтр (дёшево и быстро), строгую корректность через verify, независимую эволюцию хранения и планировщика.
-
----
-
-## Формат Segment V1 (временный, но с правильными границами)
-
-Папка сегмента содержит три файла:
-
-* **Файл: segments/<ID>/meta.json** — `{ version: 1, doc_count, gram_count }`
-* **Файл: segments/<ID>/grams.json** — `{ trigram: [doc_id, ...], ... }`
-* **Файл: segments/<ID>/docs.jsonl** — строки формата `StoredDoc { doc_id, ext_id, fields }`, где `fields` — только строковые поля (уже нормализованные: lower+NFKC+без диакритик).
-
-Интерфейсы уже стабильные:
-
-* `trait SegmentWriter { fn write_segment(input_jsonl, out_dir) }`
-* `trait SegmentReader { fn open_segment(path) -> Self; fn prefilter(op, grams) -> Bitmap; fn get_doc(doc_id) -> Option<&StoredDoc> }`
-
-> V2 заменит `grams.json` на `(grams.idx + grams.dat)` с FST‑лексиконом и оффсетами под Roaring‑блоки → моментальное открытие и низкая память.
+* **Сегменты (immutable)** — минимальная единица хранения/поиска. В V1 — JSON; в V2 → mmap + FST + Roaring-блоки.
+* **Prefilter** — пересечение Roaring-битмапов по обязательным 3-граммам.
+* **Verify** — строгая проверка по regex/PCRE2.
+* **Broker** — агрегация по сегментам, дедуп по `ext_id`, курсорная пагинация.
+* **LSM ingest (roadmap)** — WAL → memtable → flush/compaction.
+* **Шардинг (roadmap)** — `manifest.json` + `pin_gen` для стабильного повторного поиска.
 
 ---
 
-## Как работает поиск (мазками)
+## API
 
-1. **Нормализация** (см. `crates/grepzilla_segment/src/normalizer.rs`): lower → NFKC → удаление диакритик.
-2. **Wildcard → обязательные граммы** (см. `crates/grepzilla_segment/src/gram.rs`): берём длинные литеральные фрагменты (≥3), раскладываем в 3‑граммы.
-3. **Prefilter** (см. `segjson.rs::prefilter`): Roaring‑пересечения/объединения/andnot по граммам (AND/OR/NOT).
-4. **Verify** (см. `crates/gzctl/src/main.rs`): wildcard компилируется в `regex`, проверка по нужному полю (если задано) или по всем.
-5. **Пагинация**: итерация `doc_id` по возрастанию с `--offset/--limit`.
+### POST /search
 
-Почему быстро: тяжёлый regex не бьёт по всему корпусу — сперва жёсткая усечка по n‑gram, потом «дорогая» проверка только на кандидатах.
+Запрос c указанием сегментов:
+
+```json
+{
+  "wildcard": "*error*",
+  "field": "text.body",
+  "segments": ["segments/000001","segments/000002"],
+  "page": { "size": 10, "cursor": null },
+  "limits": { "parallelism": 2, "deadline_ms": 500, "max_candidates": 200000 }
+}
+```
+
+Ответ:
+
+```json
+{
+  "hits": [
+    { "ext_id":"abc","doc_id":123,"matched_field":"text.body","preview":"...error..." }
+  ],
+  "cursor": {
+    "per_seg": {
+      "segments/000001": { "last_docid": 345 },
+      "segments/000002": { "last_docid": 78 }
+    },
+    "pin_gen": { "0": 7 }
+  },
+  "metrics": {
+    "candidates_total": 42,
+    "time_to_first_hit_ms": 3,
+    "deadline_hit": false,
+    "saturated_sem": 0,
+    "dedup_dropped": 1,
+    "prefilter_ms": 13,
+    "verify_ms": 8,
+    "prefetch_ms": 2,
+    "warmed_docs": 5
+  }
+}
+```
+
+#### По шардам (через манифест)
+
+```json
+{
+  "wildcard": "*error*",
+  "shards": [0,1],
+  "page": { "size": 10, "cursor": null }
+}
+```
 
 ---
 
-## Примеры запуска
+### GET /manifest/:shard
 
-### Построить сегмент
+Возвращает список сегментов для шарда:
+
+```json
+{ "shard": 0, "gen": 7, "segments": ["segments/000001","segments/000002"] }
+```
+
+### GET /healthz
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+## Переменные окружения
+
+### `GZ_MANIFEST`
+
+Путь к `manifest.json`:
+
+```json
+{
+  "shards": { "0": 7 },
+  "segments": { "0:7": ["segments/000001","segments/000002"] }
+}
+```
+
+### `GZ_VERIFY`
+
+Выбор движка верификации:
+
+* `regex` (по умолчанию)
+* `pcre2`
+
+Пример:
 
 ```bash
-# Файл: examples/data.jsonl
-./target/release/gzctl build-seg --input examples/data.jsonl --out segments/000001
+export GZ_VERIFY=pcre2
+# Windows PowerShell:
+$env:GZ_VERIFY = "pcre2"
 ```
 
-### Поиск без указания поля
+---
+
+## Примеры PowerShell (Windows)
+
+### POST /search (сегменты)
+
+```powershell
+$body = @{
+  wildcard = "*игра*"
+  segments = @("segments/000001")
+  page     = @{ size = 5; cursor = $null }
+} | ConvertTo-Json -Depth 6
+
+Invoke-RestMethod -Method POST `
+  -Uri "http://localhost:8080/search" `
+  -ContentType "application/json" `
+  -Body $body | ConvertTo-Json -Depth 8
+```
+
+### POST /search (по шардам)
+
+```powershell
+$env:GZ_MANIFEST = "C:\work\grepzilla\manifest.json"
+
+$body = @{
+  wildcard = "*error*"
+  shards   = @(0)
+  page     = @{ size = 10; cursor = $null }
+} | ConvertTo-Json -Depth 6
+
+Invoke-RestMethod -Method POST `
+  -Uri "http://localhost:8080/search" `
+  -ContentType "application/json" `
+  -Body $body | ConvertTo-Json -Depth 8
+```
+
+### Продолжение со второй страницы
+
+```powershell
+$cursor = ($resp | ConvertTo-Json -Depth 8 | ConvertFrom-Json).cursor
+
+$body2 = @{
+  wildcard = "*error*"
+  segments = @("segments/000001")
+  page     = @{ size = 10; cursor = $cursor }
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method POST `
+  -Uri "http://localhost:8080/search" `
+  -ContentType "application/json" `
+  -Body $body2 | ConvertTo-Json -Depth 10
+```
+
+---
+
+## Быстрый старт брокера
 
 ```bash
-./target/release/gzctl search-seg --seg segments/000001 --q "*кот*"
-# ext_id\tdoc_id\tpreview
+# Linux/macOS
+export GZ_MANIFEST=manifest.json
+cargo run -p broker --release
 ```
 
-### Поиск c ограничением поля
+```powershell
+# Windows PowerShell
+$env:GZ_MANIFEST = "manifest.json"
+cargo run -p broker --release
+```
+
+Проверка liveness:
 
 ```bash
-./target/release/gzctl search-seg --seg segments/000001 --q "*мяч*" --field text.body
+curl http://localhost:8080/healthz
 ```
-
----
-
-## Дизайн, ориентированный на гиперскейл
-
-* **n‑gram по умолчанию 3** (2 для CJK можно включить локально). Это обеспечивает поддержку `*подстрока*` и большинства «простых» regex без backtracking.
-* **Roaring** для postings: быстрые пересечения, компактность, стабильная латентность.
-* **Field mask** (V2): `field_id -> Bitmap(docIds)` для «узких» запросов по полю уже на префильтре.
-* **Budgets & Cursors** (в брокере, V2): для «толстых» запросов выдаём стриминг‑результаты в SLA, не перегревая кластер.
-* **Сегменты иммутабельны**: простые снапшоты/бэкапы, понятные компакции, разделение IO.
-
----
-
-## План эволюции (минимум боли)
-
-1. **V2 Segment (mmap/FST/blocks)**
-
-   * `grams.idx`: FST‑лексикон → оффсеты;
-   * `grams.dat`: блоки Roaring с zstd, bloom‑на‑блок;
-   * `docs.dat`: колоночный DocStore; meta с min/max по времени и DF‑гистограммами.
-2. **Field mask** в сегменте и пересечение на префильтре.
-3. **Позиции** (опционально) и BM25F‑ранжирование.
-4. **Broker**: парсер/планировщик/шард‑маршрутизация/курсор и бюджеты.
-5. **Ingest LSM**: WAL → memtable → flush/compaction; tombstones.
-
-Интерфейсы в этом README уже под это заточены — апгрейды из V1 → V2 прозрачны для CLI и приложений.
-
----
-
-## Конфиги и соглашения
-
-* Нормализация: lower + NFKC + strip‑accents (плюс флаг на транслит при необходимости).
-* Условно индексируем **все строковые поля**. Для production — mapping (например, `text.*`).
-* Минимальная сила паттерна: требуется литеральная цепочка ≥3 символов; иначе отказ (политика защиты от full‑scan).
-
----
-
-## Наблюдаемость (V2 план)
-
-* Метрики: p50/p95/p99 по этапам (prefilter/verify/total), размер кандидатов, cache hit‑rate.
-* Логи: AST запроса, выбранные граммы, бюджеты, маршрутизация и прогресс по сегментам.
 
 ---
 
@@ -159,13 +242,10 @@ Apache 2.0 — свободное использование с сохранен
 
 ---
 
-### Быстрые ссылки на исходники
+## Быстрые ссылки на исходники
 
 * Нормализация: `crates/grepzilla_segment/src/normalizer.rs`
-* 3‑граммы и разбор шаблонов: `crates/grepzilla_segment/src/gram.rs`
-* Writer/Reader сегмента V1: `crates/grepzilla_segment/src/segjson.rs`
+* 3-граммы: `crates/grepzilla_segment/src/gram.rs`
+* Segment V1: `crates/grepzilla_segment/src/segjson.rs`
 * CLI: `crates/gzctl/src/main.rs`
-
-
-
-
+* Broker API: `crates/broker/src/http_api.rs`
