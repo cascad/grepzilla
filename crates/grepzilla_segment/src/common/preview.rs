@@ -1,73 +1,82 @@
+// crates/grepzilla_segment/src/common/preview.rs
 use crate::StoredDoc;
 
 /// Опции превью.
 pub struct PreviewOpts<'a> {
-    /// Поля по приоритету (будет взято первое существующее).
+    /// Поля по приоритету (будет взято первое подходящее).
     pub preferred_fields: &'a [&'a str],
     /// Целевое окно вывода в символах (не байтах).
     pub max_len: usize,
-    /// Подсветить первую встречу иглы (уже нормализованную). Если None — просто обрезка.
+    /// Подсветить первую встречу иглы (уже нормализованной). Если None — просто обрезка.
     pub highlight_needle: Option<&'a str>,
-}
-
-fn pick_field_text<'a>(doc: &'a StoredDoc, preferred: &[&str]) -> Option<&'a String> {
-    for f in preferred {
-        if let Some(t) = doc.fields.get(*f) {
-            if !t.is_empty() {
-                return Some(t);
-            }
-        }
-    }
-    None
 }
 
 /// Построить превью с подсветкой вокруг первого вхождения `highlight_needle`
 /// или усечённый текст, если игла не найдена. Всегда работает по границам UTF-8 символов.
+///
+/// Выбор поля:
+/// 1) если есть игла — берём первое поле из `preferred_fields`, где она встречается;
+/// 2) если среди preferred нет, ищем любую пару (поле, текст) в документе, где она встречается;
+/// 3) иначе — первое существующее поле из `preferred_fields`;
+/// 4) иначе — первое попавшееся поле документа;
 pub fn build_preview(doc: &StoredDoc, opts: PreviewOpts<'_>) -> String {
+    // 1) выберем источник текста по правилам (см. докстринг)
     let binding = String::new();
-    let text = pick_field_text(doc, opts.preferred_fields)
-        .or_else(|| doc.fields.values().next())
+    let text = pick_text_for_preview(doc, opts.preferred_fields, opts.highlight_needle)
         .unwrap_or(&binding);
 
-    // ИЩЕМ БЕЗ УЧЁТА РЕГИСТРА (UTF-8 safe).
-    match opts.highlight_needle.and_then(|n| find_substr_ci_utf8(text, n)) {
-        Some((m_start_byte, m_end_byte)) => {
-            snippet_with_highlight(text, m_start_byte, m_end_byte, opts.max_len)
-        }
+    // 2) если игла есть и найдена — делаем сниппет по матчу; иначе — просто усечение
+    match opts
+        .highlight_needle
+        .and_then(|n| (!n.is_empty()).then_some(n))
+        .and_then(|n| find_substr(text, n))
+    {
+        Some((m_start_b, m_end_b)) => snippet_with_highlight(text, m_start_b, m_end_b, opts.max_len),
         None => truncate_chars_with_ellipsis(text, opts.max_len),
     }
 }
 
-/// Case-insensitive поиск подстроки по UTF-8.
-/// Возвращает (start_byte, end_byte) в исходной строке.
-fn find_substr_ci_utf8(haystack: &str, needle: &str) -> Option<(usize, usize)> {
-    if needle.is_empty() {
-        return None;
+/// Выбор текста для превью по приоритетам и наличию иглы.
+///
+/// Возвращает ссылку на строку из `doc.fields`.
+fn pick_text_for_preview<'a>(
+    doc: &'a StoredDoc,
+    preferred: &[&str],
+    needle: Option<&str>,
+) -> Option<&'a String> {
+    // Если есть игла: сперва пробуем preferred-поля, где она встречается
+    if let Some(n) = needle {
+        if !n.is_empty() {
+            for f in preferred {
+                if let Some(t) = doc.fields.get(*f) {
+                    if find_substr(t, n).is_some() {
+                        return Some(t);
+                    }
+                }
+            }
+            // затем любое поле с матчем
+            for (_k, t) in &doc.fields {
+                if find_substr(t, n).is_some() {
+                    return Some(t);
+                }
+            }
+        }
     }
 
-    // Lowercase с поддержкой многосимвольных маппингов.
-    let h_low: String = haystack.chars().flat_map(|c| c.to_lowercase()).collect();
-    let n_low: String = needle.chars().flat_map(|c| c.to_lowercase()).collect();
-
-    // Ищем в нижнем регистре.
-    let start_b_low = h_low.find(&n_low)?;
-
-    // Индексация по символам.
-    let (h_low_byte_of_char, _) = index_chars(&h_low);
-    let (h_orig_byte_of_char, h_orig_chars) = index_chars(haystack);
-    let n_len_chars = n_low.chars().count();
-
-    // Переводим в индекс символа.
-    let start_c = byte_to_char_idx(&h_low_byte_of_char, start_b_low);
-    let end_c = start_c.saturating_add(n_len_chars);
-    if end_c > h_orig_chars {
-        return None;
+    // Иначе (или если нигде нет иглы) — первое существующее из preferred
+    for f in preferred {
+        if let Some(t) = doc.fields.get(*f) {
+            return Some(t);
+        }
     }
 
-    // Байтовые границы в исходной строке.
-    let start_b = h_orig_byte_of_char[start_c];
-    let end_b = h_orig_byte_of_char[end_c];
-    Some((start_b, end_b))
+    // В крайнем случае — первое поле документа
+    doc.fields.values().next()
+}
+
+/// Нахождение подстроки (байтовые индексы) — строки уже нормализованы, можно использовать `find`.
+fn find_substr(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    haystack.find(needle).map(|s| (s, s + needle.len()))
 }
 
 /// Возвращает сниппет вокруг матча, гарантируя границы по символам и подсветку скобками.
@@ -76,38 +85,46 @@ fn snippet_with_highlight(s: &str, m_start_b: usize, m_end_b: usize, max_chars: 
         return String::new();
     }
 
-    // Таблица: char_idx -> byte_offset
+    // Построим таблицу: char_idx -> byte_offset
     let (byte_of_char, total_chars) = index_chars(s);
 
+    // Переведём байтовые индексы матча в индекс символов.
     let m_start_c = byte_to_char_idx(&byte_of_char, m_start_b);
     let m_end_c = byte_to_char_idx(&byte_of_char, m_end_b);
     let match_len_c = m_end_c.saturating_sub(m_start_c);
 
-    // Сколько контекста дать по краям
+    // Бюджет на контекст по краям, учитывая скобки.
     let budget = max_chars.saturating_sub(match_len_c + 2);
     let ctx = budget / 2;
 
     let from_c = m_start_c.saturating_sub(ctx);
     let to_c = (m_end_c + ctx).min(total_chars);
 
+    // Обратно в байты.
     let (from_b, to_b) = (byte_of_char[from_c], byte_of_char[to_c]);
 
     let mut out = String::new();
+
     if from_c > 0 {
         out.push('…');
     }
+    // левая часть
     out.push_str(&s[from_b..m_start_b]);
+    // подсветка
     out.push('[');
     out.push_str(&s[m_start_b..m_end_b]);
     out.push(']');
+    // правая часть
     out.push_str(&s[m_end_b..to_b]);
     if to_c < total_chars {
         out.push('…');
     }
 
-    ensure_max_chars(&out, max_chars + 4) // небольшой запас
+    // Подстраховка на случай округлений: уложим в max_chars+4 (запас на «…»/скобки)
+    ensure_max_chars(&out, max_chars + 4)
 }
 
+/// Усечение по символам с многоточием; безопасно для UTF-8.
 fn truncate_chars_with_ellipsis(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -125,6 +142,7 @@ fn truncate_chars_with_ellipsis(s: &str, max_chars: usize) -> String {
 /// Строит массив byte_of_char: для каждого индекса символа — смещение в байтах.
 /// Возвращает (таблица, количество символов).
 fn index_chars(s: &str) -> (Vec<usize>, usize) {
+    // Пример: "привет" -> [0,2,4,6,8,10], len=6; добавляем s.len() как «конечную» границу.
     let mut byte_of_char = Vec::with_capacity(s.len() + 1);
     for (b, _) in s.char_indices() {
         byte_of_char.push(b);

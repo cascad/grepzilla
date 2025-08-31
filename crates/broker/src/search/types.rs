@@ -61,6 +61,16 @@ pub struct SearchMetrics {
     pub deadline_hit: bool,
     pub saturated_sem: u64,
     pub dedup_dropped: u64,
+
+    // NEW (optional, агрегированные по всем сегам):
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefilter_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefetch_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmed_docs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

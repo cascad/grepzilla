@@ -10,9 +10,13 @@ use crate::search::executor::{ParallelExecutor, SegmentTaskInput, SegmentTaskOut
 use crate::search::paginator::Paginator;
 use crate::search::types::*;
 
+use grepzilla_segment::normalizer::normalize;
+use grepzilla_segment::verify::{EnvVerifyFactory, VerifyFactory};
+
 pub struct SearchCoordinator {
     default_parallelism: usize,
     manifest: Option<Arc<dyn ManifestStore>>,
+    verify_factory: Arc<dyn VerifyFactory>,
 }
 
 impl SearchCoordinator {
@@ -20,6 +24,7 @@ impl SearchCoordinator {
         Self {
             default_parallelism,
             manifest: None,
+            verify_factory: Arc::new(EnvVerifyFactory::from_env()),
         }
     }
 
@@ -28,14 +33,20 @@ impl SearchCoordinator {
         self
     }
 
+    #[allow(dead_code)]
+    pub fn with_verify_factory(mut self, vf: Arc<dyn VerifyFactory>) -> Self {
+        self.verify_factory = vf;
+        self
+    }
+
     pub async fn handle(&self, req: SearchRequest) -> anyhow::Result<SearchResponse> {
         let start = std::time::Instant::now();
 
         // выбрать сегменты (shards → manifest; иначе — segments из запроса)
         let mut pin_gen = std::collections::HashMap::new();
-        let selected: Vec<SegRef> =
+        let mut selected: Vec<SegRef> =
             if let (Some(store), Some(shards)) = (&self.manifest, req.shards.as_ref()) {
-                let (segs, pin) = store.resolve(shards).await?; // resolve() теперь виден
+                let (segs, pin) = store.resolve(shards).await?;
                 pin_gen = pin;
                 segs
             } else {
@@ -49,15 +60,18 @@ impl SearchCoordinator {
                     .collect()
             };
 
-        // NEW: приоритизируем свежие гены внутри шарда
-        let mut selected = selected;
+        // приоритизируем свежие гены внутри шарда
         selected.sort_by(|a, b| {
             use std::cmp::Ordering::*;
             match a.shard.cmp(&b.shard) {
-                Equal => b.gen.cmp(&a.gen), // DESC по gen!
+                Equal => b.gen.cmp(&a.gen), // DESC по gen
                 other => other,
             }
         });
+
+        // Скомпилируем VerifyEngine ОДИН РАЗ на весь запрос
+        let normalized_wc = normalize(&req.wildcard);
+        let verify_engine = self.verify_factory.compile(&normalized_wc)?;
 
         let limits = req.limits.clone().unwrap_or(SearchLimits {
             parallelism: None,
@@ -78,16 +92,18 @@ impl SearchCoordinator {
                 field: req.field.clone().unwrap_or_default(),
                 cursor_docid: extract_last_docid(&req.page.cursor, &s.path),
                 max_candidates: limits.max_candidates.unwrap_or(200_000),
-                // NEW:
                 page_size: req.page.size,
+                verify_engine: verify_engine.clone(), // прокидываем движок в таск
             })
             .collect::<Vec<_>>();
 
         let ct = CancellationToken::new();
         let deadline = limits.deadline_duration();
 
+        // замыкание ничего не захватывает; движок берём из input.verify_engine
         let search_fn = |input: SegmentTaskInput, ctok: CancellationToken| async move {
-            let out = crate::storage_adapter::search_one_segment(input, ctok).await?;
+            let eng = input.verify_engine.clone();
+            let out = crate::storage_adapter::search_one_segment(input, eng, ctok).await?;
             Ok::<SegmentTaskOutput, anyhow::Error>(out)
         };
 
@@ -95,8 +111,19 @@ impl SearchCoordinator {
             .run_all(ct.clone(), tasks, search_fn, req.page.size, deadline)
             .await;
 
-        let (hits, mut cursor, candidates_total, dedup_dropped) =
-            Paginator::merge(parts, req.page.size);
+        // merge + дедуп
+
+        let (
+            hits,
+            mut cursor,
+            candidates_total,
+            dedup_dropped,
+            prefilter_ms,
+            verify_ms,
+            prefetch_ms,
+            warmed_docs,
+        ) = Paginator::merge(parts, req.page.size);
+
         let ttfh = if hits.is_empty() {
             0
         } else {
@@ -116,6 +143,10 @@ impl SearchCoordinator {
                 deadline_hit,
                 saturated_sem: saturated_sem as u64,
                 dedup_dropped,
+                prefilter_ms: Some(prefilter_ms),
+                verify_ms: Some(verify_ms),
+                prefetch_ms: Some(prefetch_ms),
+                warmed_docs: Some(warmed_docs),
             },
         })
     }

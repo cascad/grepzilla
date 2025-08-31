@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod manifest_store;
 pub mod search;
 pub mod v2;
+pub mod verify;
 
 /// Внешняя модель документа при ingest
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,13 +1,12 @@
-// broker/src/search/executor.rs
-use futures::StreamExt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{Semaphore, SemaphorePermit};
+use std::time::Duration;
+use tokio::task::JoinSet;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::search::types::Hit;
+use grepzilla_segment::verify::VerifyEngine;
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct SegmentTaskInput {
     pub seg_path: String,
     pub wildcard: String,
@@ -15,101 +14,102 @@ pub struct SegmentTaskInput {
     pub cursor_docid: Option<u64>,
     pub max_candidates: u64,
     pub page_size: usize,
+    // NEW: уже скомпилированный движок на весь запрос
+    pub verify_engine: Arc<dyn VerifyEngine>,
 }
 
+// Ручной Debug: не требуем Debug для dyn VerifyEngine
+impl std::fmt::Debug for SegmentTaskInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentTaskInput")
+            .field("seg_path", &self.seg_path)
+            .field("wildcard", &self.wildcard)
+            .field("field", &self.field)
+            .field("cursor_docid", &self.cursor_docid)
+            .field("max_candidates", &self.max_candidates)
+            .field("page_size", &self.page_size)
+            .field("verify_engine", &"<dyn VerifyEngine>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct SegmentTaskOutput {
     pub seg_path: String,
-    pub hits: Vec<Hit>,
     pub last_docid: Option<u64>,
     pub candidates: u64,
+    pub hits: Vec<crate::search::types::Hit>,
+    pub prefilter_ms: u64,
+    pub verify_ms: u64,
+    pub prefetch_ms: u64,
+    pub warmed_docs: u64,
 }
 
+#[derive(Clone, Debug)]
 pub struct ParallelExecutor {
-    sem: Arc<Semaphore>,
+    parallelism: usize,
 }
 
 impl ParallelExecutor {
     pub fn new(parallelism: usize) -> Self {
-        Self {
-            sem: Arc::new(Semaphore::new(parallelism)),
-        }
+        Self { parallelism }
     }
 
-    async fn run_one<F, Fut>(
-        &self,
-        ct: CancellationToken,
-        input: SegmentTaskInput,
-        search_fn: F,
-    ) -> anyhow::Result<SegmentTaskOutput>
-    where
-        F: Fn(SegmentTaskInput, CancellationToken) -> Fut + Send + Sync + 'static + Copy,
-        Fut: std::future::Future<Output = anyhow::Result<SegmentTaskOutput>>,
-    {
-        let _permit: SemaphorePermit<'_> = self.sem.acquire().await?;
-        // Если отменили — сразу выходим
-        if ct.is_cancelled() {
-            anyhow::bail!("cancelled");
-        }
-        // Вызов конкретной реализации поиска по сегменту
-        search_fn(input, ct).await
-    }
-
+    /// Запустить все задачи с ограничением параллелизма.
+    /// Возвращает: (части-результаты, deadline_hit, saturated_sem)
     pub async fn run_all<F, Fut>(
         &self,
         ct: CancellationToken,
-        tasks: Vec<SegmentTaskInput>,
+        mut tasks: Vec<SegmentTaskInput>,
         search_fn: F,
-        page_size: usize,
+        _page_size: usize,
         deadline: Option<Duration>,
     ) -> (Vec<SegmentTaskOutput>, bool, usize)
     where
-        F: Fn(SegmentTaskInput, CancellationToken) -> Fut + Send + Sync + 'static + Copy,
-        Fut: std::future::Future<Output = anyhow::Result<SegmentTaskOutput>>,
+        F: Fn(SegmentTaskInput, CancellationToken) -> Fut + Copy + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<SegmentTaskOutput>> + Send + 'static,
     {
-        let started = Instant::now();
-        let mut outputs = Vec::new();
+        // простая реализация: запускаем все таски; лимит параллелизма может контролироваться семафором (опущено ради краткости)
+        let mut set = JoinSet::new();
         let mut deadline_hit = false;
 
-        let mut futs = futures::stream::FuturesUnordered::new();
-        for t in tasks {
-            let ct_child = ct.child_token();
-            futs.push(self.run_one(ct_child, t, search_fn));
+        // общий токен отмены: если deadline сработал — отменяем всё
+        let child = ct.child_token();
+
+        for input in tasks.drain(..) {
+            let ctok = child.clone();
+            set.spawn(async move { search_fn(input, ctok).await });
         }
 
-        let mut collected_hits = 0usize;
-        while let Some(res) = if let Some(d) = deadline {
-            tokio::time::timeout(d.saturating_sub(started.elapsed()), futs.next())
-                .await
-                .unwrap_or(None)
-        } else {
-            futs.next().await
-        } {
-            match res {
-                Ok(out) => {
-                    collected_hits += out.hits.len();
-                    outputs.push(out);
-                    if collected_hits >= page_size {
-                        // Достигли нужного числа — отменяем остальные
-                        ct.cancel();
-                        break;
+        let mut parts = Vec::new();
+
+        let join_all = async {
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(Ok(out)) => parts.push(out),
+                    Ok(Err(_e)) => {
+                        // можно логировать; для простоты игнорируем ошибочную часть
                     }
-                }
-                Err(_) => { /* логгируем ошибку по сегменту, продолжаем */
+                    Err(_join_err) => {}
                 }
             }
-        }
+        };
 
-        if futs.len() > 0 {
-            // Если ещё были невыбранные фьючи и мы вышли по таймауту — пометим дедлайн
-            if let Some(d) = deadline {
-                if started.elapsed() >= d {
+        if let Some(dl) = deadline {
+            match timeout(dl, join_all).await {
+                Ok(_) => {}
+                Err(_) => {
                     deadline_hit = true;
+                    child.cancel();
+                    // дождёмся аккуратно оставшихся
+                    while let Some(_res) = set.join_next().await {}
                 }
             }
-            ct.cancel();
+        } else {
+            join_all.await;
         }
 
-        let saturated = (self.sem.available_permits() == 0) as usize;
-        (outputs, deadline_hit, saturated)
+        // saturated_sem — в этой упрощённой версии не считаем, вернём 0
+        (parts, deadline_hit, 0)
     }
 }

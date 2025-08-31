@@ -13,37 +13,39 @@ impl Paginator {
     pub fn merge(
         parts: Vec<SegmentTaskOutput>,
         page_size: usize,
-    ) -> (Vec<Hit>, SearchCursor, u64, u64) {
-        let mut hits: Vec<Hit> = Vec::with_capacity(page_size);
+    ) -> (Vec<Hit>, SearchCursor, u64, u64, u64, u64, u64, u64) {
+        let mut hits: Vec<Hit> = Vec::new();
         let mut per_seg: HashMap<String, PerSegPos> = HashMap::new();
         let mut candidates_total: u64 = 0;
+
+        // NEW: агрегированные метрики
+        let mut agg_prefilter_ms = 0u64;
+        let mut agg_verify_ms = 0u64;
+        let mut agg_prefetch_ms = 0u64;
+        let mut agg_warmed_docs = 0u64;
+
+        // дедуп по ext_id
         let mut seen_ext: HashSet<String> = HashSet::new();
+        let mut dedup_dropped = 0u64;
 
-        // для подсчёта dedup
-        let mut incoming_hits_total: u64 = 0;
-
-        // 1) суммируем кандидатов и потенциальные входящие хиты
-        for p in &parts {
-            candidates_total += p.candidates as u64;
-            incoming_hits_total += p.hits.len() as u64;
-        }
-
-        // 2) набираем страницу с дедупом по ext_id
         for p in parts.into_iter() {
-            if hits.len() < page_size {
-                for h in p.hits {
-                    if !seen_ext.insert(h.ext_id.clone()) {
-                        // дубликат — пропускаем
-                        continue;
-                    }
+            candidates_total += p.candidates;
+            agg_prefilter_ms += p.prefilter_ms;
+            agg_verify_ms += p.verify_ms;
+            agg_prefetch_ms += p.prefetch_ms;
+            agg_warmed_docs += p.warmed_docs;
+
+            for h in p.hits {
+                if hits.len() >= page_size {
+                    break;
+                }
+                if seen_ext.insert(h.ext_id.clone()) {
                     hits.push(h);
-                    if hits.len() >= page_size {
-                        break;
-                    }
+                } else {
+                    dedup_dropped += 1;
                 }
             }
 
-            // per-seg курсор фиксируем всегда
             per_seg.insert(
                 p.seg_path.clone(),
                 PerSegPos {
@@ -52,14 +54,20 @@ impl Paginator {
             );
         }
 
-        // 3) dedup_dropped = сколько хитов мы отбросили из-за дубликатов
-        let dedup_dropped = incoming_hits_total.saturating_sub(hits.len() as u64);
-
         let cursor = SearchCursor {
             per_seg,
-            pin_gen: None, // заполнит координатор, если работаем через manifest/shards
+            pin_gen: None,
         };
 
-        (hits, cursor, candidates_total, dedup_dropped)
+        (
+            hits,
+            cursor,
+            candidates_total,
+            dedup_dropped,
+            agg_prefilter_ms,
+            agg_verify_ms,
+            agg_prefetch_ms,
+            agg_warmed_docs,
+        )
     }
 }

@@ -35,7 +35,11 @@ fn write_manifest_exact(tempdir: &std::path::Path, manifest_json: &serde_json::V
     std::env::set_var("GZ_MANIFEST", path.to_str().unwrap());
 }
 
-async fn post_json(app: &Router, uri: &str, body: &serde_json::Value) -> (axum::http::StatusCode, Vec<u8>) {
+async fn post_json(
+    app: &Router,
+    uri: &str,
+    body: &serde_json::Value,
+) -> (axum::http::StatusCode, Vec<u8>) {
     let resp = app
         .clone()
         .oneshot(
@@ -59,7 +63,12 @@ async fn get_json(app: &Router, uri: &str) -> serde_json::Value {
         .oneshot(Request::get(uri).body(axum::body::Body::empty()).unwrap())
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "GET {} status = {}", uri, resp.status());
+    assert!(
+        resp.status().is_success(),
+        "GET {} status = {}",
+        uri,
+        resp.status()
+    );
     let collected = resp.into_body().collect().await.unwrap();
     let bytes = collected.to_bytes();
     serde_json::from_slice(&bytes).unwrap()
