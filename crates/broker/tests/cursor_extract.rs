@@ -23,6 +23,9 @@ fn extract_last_docid_from_cursor_json() {
     let got = extract_last_docid(&Some(cur), "segments/000001");
     assert_eq!(got, Some(42));
 
-    let none = extract_last_docid(&Some(serde_json::json!({ "per_seg": {} })), "segments/000001");
+    let none = extract_last_docid(
+        &Some(serde_json::json!({ "per_seg": {} })),
+        "segments/000001",
+    );
     assert_eq!(none, None);
 }

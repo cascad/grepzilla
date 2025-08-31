@@ -72,7 +72,12 @@ impl Paginator {
             cursor,
             candidates_total,
             dedup_dropped,
-            (prefilter_ms_total, verify_ms_total, prefetch_ms_total, warmed_docs_total),
+            (
+                prefilter_ms_total,
+                verify_ms_total,
+                prefetch_ms_total,
+                warmed_docs_total,
+            ),
         )
     }
 }

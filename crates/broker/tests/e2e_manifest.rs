@@ -1,5 +1,8 @@
 // crates/broker/tests/e2e_manifest.rs
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use std::{fs, sync::Arc};
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -16,14 +19,17 @@ async fn manifest_get_ok() {
             "shards": { "0": 7 },
             "segments": { "0:7": ["segments/000001","segments/000002"] }
         }"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Пропишем путь через переменную окружения, как делает http_api::get_manifest
     std::env::set_var("GZ_MANIFEST", manifest_path.to_string_lossy().to_string());
 
     // 2) Поднимем минимальный app
     let coord = broker::search::SearchCoordinator::new(2);
-    let app = broker::http_api::router(broker::http_api::AppState { coord: Arc::new(coord) });
+    let app = broker::http_api::router(broker::http_api::AppState {
+        coord: Arc::new(coord),
+    });
 
     // 3) Запрос
     let resp = app
@@ -39,7 +45,9 @@ async fn manifest_get_ok() {
 
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
     // Проверки структуры

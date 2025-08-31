@@ -68,7 +68,11 @@ pub async fn search_one_segment(
                 Some(f) => {
                     if let Some(doc) = reader.get_doc(doc_id) {
                         let ok = doc.fields.get(f).map(|t| eng.is_match(t)).unwrap_or(false);
-                        if ok { Some(f.to_string()) } else { None }
+                        if ok {
+                            Some(f.to_string())
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -180,7 +184,12 @@ pub async fn search_one_segment(
                                 build_preview(
                                     doc,
                                     PreviewOpts {
-                                        preferred_fields: &["text.title", "text.body", "title", "body"],
+                                        preferred_fields: &[
+                                            "text.title",
+                                            "text.body",
+                                            "title",
+                                            "body",
+                                        ],
                                         max_len: 180,
                                         highlight_needle: longest_literal_needle(&nq).as_deref(),
                                     },
@@ -235,7 +244,11 @@ pub async fn search_one_segment(
 
 #[inline]
 fn non_empty(s: &str) -> Option<&str> {
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[inline]
@@ -253,45 +266,65 @@ fn longest_literal_needle(wc: &str) -> Option<String> {
     for ch in wc.chars() {
         match ch {
             '*' | '?' => {
-                if cur.len() > best.len() { best = std::mem::take(&mut cur); }
-                else { cur.clear(); }
+                if cur.len() > best.len() {
+                    best = std::mem::take(&mut cur);
+                } else {
+                    cur.clear();
+                }
             }
             _ => cur.push(ch),
         }
     }
-    if cur.len() > best.len() { best = cur; }
-    if best.is_empty() { None } else { Some(best) }
+    if cur.len() > best.len() {
+        best = cur;
+    }
+    if best.is_empty() {
+        None
+    } else {
+        Some(best)
+    }
 }
 
 /// Построить сниппет по байтовым смещениям матча с корректными границами UTF-8.
 /// Всегда вставляет `[` и `]` вокруг матча; добавляет `…` если фрагмент усечён.
-fn snippet_with_highlight_utf8(s: &str, m_start_b: usize, m_end_b: usize, max_chars: usize) -> String {
-    if max_chars == 0 || s.is_empty() { return String::new(); }
+fn snippet_with_highlight_utf8(
+    s: &str,
+    m_start_b: usize,
+    m_end_b: usize,
+    max_chars: usize,
+) -> String {
+    if max_chars == 0 || s.is_empty() {
+        return String::new();
+    }
 
     let (byte_of_char, total_chars) = index_chars(s);
 
     // Переводим байтовые индексы в индексы по символам
     let m_start_c = byte_to_char_idx(&byte_of_char, m_start_b);
-    let m_end_c   = byte_to_char_idx(&byte_of_char, m_end_b);
+    let m_end_c = byte_to_char_idx(&byte_of_char, m_end_b);
     let match_len_c = m_end_c.saturating_sub(m_start_c);
 
     let budget = max_chars.saturating_sub(match_len_c + 2); // +2 на скобки
     let ctx = budget / 2;
 
     let from_c = m_start_c.saturating_sub(ctx);
-    let to_c   = (m_end_c + ctx).min(total_chars);
+    let to_c = (m_end_c + ctx).min(total_chars);
 
     let from_b = byte_of_char[from_c];
-    let to_b   = byte_of_char[to_c];
+    let to_b = byte_of_char[to_c];
 
     let mut out = String::new();
-    if from_c > 0 { out.push('…'); }
+    if from_c > 0 {
+        out.push('…');
+    }
     out.push_str(&s[from_b..m_start_b]);
     out.push('[');
     out.push_str(&s[m_start_b..m_end_b]);
     out.push(']');
     out.push_str(&s[m_end_b..to_b]);
-    if to_c < total_chars { out.push('…'); }
+    if to_c < total_chars {
+        out.push('…');
+    }
 
     ensure_max_chars(&out, max_chars + 4)
 }
@@ -320,8 +353,14 @@ fn ensure_max_chars(s: &str, max_chars: usize) -> String {
     let mut it = s.chars();
     let mut out = String::new();
     for _ in 0..max_chars {
-        if let Some(ch) = it.next() { out.push(ch); } else { return out; }
+        if let Some(ch) = it.next() {
+            out.push(ch);
+        } else {
+            return out;
+        }
     }
-    if it.next().is_some() { out.push('…'); }
+    if it.next().is_some() {
+        out.push('…');
+    }
     out
 }

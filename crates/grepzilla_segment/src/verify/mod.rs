@@ -2,9 +2,9 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-mod regex_impl;
 #[cfg(feature = "engine-pcre2")]
 mod pcre2_impl;
+mod regex_impl;
 
 pub mod factory;
 pub use factory::{EnvVerifyFactory, VerifyFactory};

@@ -593,3 +593,11 @@ cargo run -p broker
 - [ ] **D9.1** Удалить остаточные `use regex::Regex` (кроме verify_impl).
 - [ ] **D9.2** Удалить старые/устаревшие тесты (например, для V1 без манифеста).
 - [ ] **D9.3** Финальный прогон `cargo test --workspace` и `cargo clippy --all-targets`.
+
+------
+
+```sh
+cargo fmt --all
+cargo test --workspace
+cargo clippy --all-targets --all-features -- -D warnings
+```

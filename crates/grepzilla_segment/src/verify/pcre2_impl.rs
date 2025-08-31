@@ -33,7 +33,7 @@ impl VerifyFactory for Pcre2Factory {
         let pat = wildcard_to_regex_pattern(normalized_wildcard);
         let rx = RegexBuilder::new()
             .caseless(true) // (?i)
-            .dotall(true)   // (?s)
+            .dotall(true) // (?s)
             .build(&pat)
             .map_err(|e| anyhow::anyhow!("pcre2 compile error: {e}"))?;
         Ok(Arc::new(Pcre2Engine { rx }))

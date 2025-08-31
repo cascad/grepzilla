@@ -135,10 +135,26 @@ impl SearchCoordinator {
                 deadline_hit,
                 saturated_sem: saturated_sem as u64,
                 dedup_dropped,
-                prefilter_ms: if has_any_metrics { Some(prefilter_ms_total) } else { None },
-                verify_ms:   if has_any_metrics { Some(verify_ms_total)   } else { None },
-                prefetch_ms: if has_any_metrics { Some(prefetch_ms_total) } else { None },
-                warmed_docs: if has_any_metrics { Some(warmed_docs_total) } else { None },
+                prefilter_ms: if has_any_metrics {
+                    Some(prefilter_ms_total)
+                } else {
+                    None
+                },
+                verify_ms: if has_any_metrics {
+                    Some(verify_ms_total)
+                } else {
+                    None
+                },
+                prefetch_ms: if has_any_metrics {
+                    Some(prefetch_ms_total)
+                } else {
+                    None
+                },
+                warmed_docs: if has_any_metrics {
+                    Some(warmed_docs_total)
+                } else {
+                    None
+                },
             },
         })
     }

@@ -21,13 +21,34 @@ fn mk_seg(seg_path: &str, hits: Vec<Hit>, last_docid: u64) -> SegmentTaskOutput 
 fn two_pages_do_not_overlap() {
     // Page 1: возьмем 3 уникальных ext_id
     let p1_parts = vec![
-        mk_seg("segments/A", vec![
-            Hit { ext_id: "id-1".into(), doc_id: 1, matched_field: "text".into(), preview: "...".into() },
-            Hit { ext_id: "id-2".into(), doc_id: 2, matched_field: "text".into(), preview: "...".into() },
-        ], /*last_docid*/ 2),
-        mk_seg("segments/B", vec![
-            Hit { ext_id: "id-3".into(), doc_id: 7, matched_field: "text".into(), preview: "...".into() },
-        ], /*last_docid*/ 7),
+        mk_seg(
+            "segments/A",
+            vec![
+                Hit {
+                    ext_id: "id-1".into(),
+                    doc_id: 1,
+                    matched_field: "text".into(),
+                    preview: "...".into(),
+                },
+                Hit {
+                    ext_id: "id-2".into(),
+                    doc_id: 2,
+                    matched_field: "text".into(),
+                    preview: "...".into(),
+                },
+            ],
+            /*last_docid*/ 2,
+        ),
+        mk_seg(
+            "segments/B",
+            vec![Hit {
+                ext_id: "id-3".into(),
+                doc_id: 7,
+                matched_field: "text".into(),
+                preview: "...".into(),
+            }],
+            /*last_docid*/ 7,
+        ),
     ];
     let (hits1, cursor1, _c1, _d1, _t1) = Paginator::merge(p1_parts, /*page_size*/ 3);
     assert_eq!(hits1.len(), 3);
@@ -35,12 +56,26 @@ fn two_pages_do_not_overlap() {
     // Имитируем второй запрос: из cursor1 читается last_docid per seg (в реале это делает coordinator),
     // а storage вернёт нам уже "следующие" документы (моделируем другими hits).
     let p2_parts = vec![
-        mk_seg("segments/A", vec![
-            Hit { ext_id: "id-4".into(), doc_id: 3, matched_field: "text".into(), preview: "...".into() },
-        ], /*last_docid*/ 3),
-        mk_seg("segments/B", vec![
-            Hit { ext_id: "id-5".into(), doc_id: 8, matched_field: "text".into(), preview: "...".into() },
-        ], /*last_docid*/ 8),
+        mk_seg(
+            "segments/A",
+            vec![Hit {
+                ext_id: "id-4".into(),
+                doc_id: 3,
+                matched_field: "text".into(),
+                preview: "...".into(),
+            }],
+            /*last_docid*/ 3,
+        ),
+        mk_seg(
+            "segments/B",
+            vec![Hit {
+                ext_id: "id-5".into(),
+                doc_id: 8,
+                matched_field: "text".into(),
+                preview: "...".into(),
+            }],
+            /*last_docid*/ 8,
+        ),
     ];
     let (hits2, cursor2, _c2, _d2, _t2) = Paginator::merge(p2_parts, /*page_size*/ 3);
     assert_eq!(hits2.len(), 2);

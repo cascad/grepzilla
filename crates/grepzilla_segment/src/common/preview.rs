@@ -121,7 +121,12 @@ fn is_char_boundary(s: &str, b: usize) -> bool {
 }
 
 /// Возвращает сниппет вокруг матча, гарантируя границы по символам и подсветку скобками.
-pub fn snippet_with_highlight(s: &str, m_start_b: usize, m_end_b: usize, max_chars: usize) -> String {
+pub fn snippet_with_highlight(
+    s: &str,
+    m_start_b: usize,
+    m_end_b: usize,
+    max_chars: usize,
+) -> String {
     if max_chars == 0 || s.is_empty() {
         return String::new();
     }

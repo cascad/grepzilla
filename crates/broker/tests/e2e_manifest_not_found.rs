@@ -1,5 +1,8 @@
-use axum::{body::Body, http::{Request, StatusCode}};
-use std::{sync::Arc};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -14,14 +17,23 @@ async fn manifest_404_for_unknown_shard() {
             "shards": { "1": 1 },
             "segments": { "1:1": ["segments/xyz"] }
         }"#,
-    ).unwrap();
+    )
+    .unwrap();
     std::env::set_var("GZ_MANIFEST", manifest_path.to_string_lossy().to_string());
 
     let coord = broker::search::SearchCoordinator::new(2);
-    let app = broker::http_api::router(broker::http_api::AppState { coord: Arc::new(coord) });
+    let app = broker::http_api::router(broker::http_api::AppState {
+        coord: Arc::new(coord),
+    });
 
     let resp = app
-        .oneshot(Request::builder().uri("/manifest/0").method("GET").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/manifest/0")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 

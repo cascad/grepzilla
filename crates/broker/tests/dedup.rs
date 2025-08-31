@@ -39,7 +39,11 @@ fn merge_dedups_by_ext_id_across_segments() {
     let (hits, _cursor, _cand, dedup_dropped, _totals) =
         Paginator::merge(parts, /*page_size*/ 10);
 
-    assert_eq!(hits.len(), 1, "остаться должен один hit (уникальный ext_id)");
+    assert_eq!(
+        hits.len(),
+        1,
+        "остаться должен один hit (уникальный ext_id)"
+    );
     assert_eq!(hits[0].ext_id, "same-ext-id");
     assert_eq!(dedup_dropped, 1, "ровно один дубликат должен быть отброшен");
 }

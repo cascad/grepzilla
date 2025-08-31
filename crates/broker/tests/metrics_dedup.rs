@@ -3,7 +3,14 @@ use broker::search::executor::SegmentTaskOutput;
 use broker::search::paginator::Paginator;
 use broker::search::types::{Hit, SearchCursor, SearchMetrics, SearchResponse};
 
-fn mk_seg(seg_path: &str, hits: Vec<Hit>, prefilter: u64, verify: u64, prefetch: u64, warmed: u64) -> SegmentTaskOutput {
+fn mk_seg(
+    seg_path: &str,
+    hits: Vec<Hit>,
+    prefilter: u64,
+    verify: u64,
+    prefetch: u64,
+    warmed: u64,
+) -> SegmentTaskOutput {
     SegmentTaskOutput {
         seg_path: seg_path.to_string(),
         last_docid: Some(5),
@@ -44,7 +51,7 @@ fn paginator_aggregates_metrics_and_reports_dedup() {
             saturated_sem: 0,
             dedup_dropped,
             prefilter_ms: Some(prefilter_ms_total),
-            verify_ms:   Some(verify_ms_total),
+            verify_ms: Some(verify_ms_total),
             prefetch_ms: Some(prefetch_ms_total),
             warmed_docs: Some(warmed_docs_total),
         },
@@ -55,7 +62,7 @@ fn paginator_aggregates_metrics_and_reports_dedup() {
     assert_eq!(resp.metrics.candidates_total, 2);
 
     assert_eq!(resp.metrics.prefilter_ms, Some(2 + 11));
-    assert_eq!(resp.metrics.verify_ms,   Some(3 + 13));
+    assert_eq!(resp.metrics.verify_ms, Some(3 + 13));
     assert_eq!(resp.metrics.prefetch_ms, Some(5 + 17));
     assert_eq!(resp.metrics.warmed_docs, Some(7 + 19));
 

@@ -27,10 +27,26 @@ fn metrics_are_null_when_empty() {
             deadline_hit: false,
             saturated_sem: 0,
             dedup_dropped,
-            prefilter_ms: if has_any_metrics { Some(prefilter_ms_total) } else { None },
-            verify_ms:   if has_any_metrics { Some(verify_ms_total)   } else { None },
-            prefetch_ms: if has_any_metrics { Some(prefetch_ms_total) } else { None },
-            warmed_docs: if has_any_metrics { Some(warmed_docs_total) } else { None },
+            prefilter_ms: if has_any_metrics {
+                Some(prefilter_ms_total)
+            } else {
+                None
+            },
+            verify_ms: if has_any_metrics {
+                Some(verify_ms_total)
+            } else {
+                None
+            },
+            prefetch_ms: if has_any_metrics {
+                Some(prefetch_ms_total)
+            } else {
+                None
+            },
+            warmed_docs: if has_any_metrics {
+                Some(warmed_docs_total)
+            } else {
+                None
+            },
         },
     };
 
@@ -38,7 +54,7 @@ fn metrics_are_null_when_empty() {
     let j = serde_json::to_value(&resp).expect("json");
     let m = &j["metrics"];
     assert_eq!(m["prefilter_ms"], serde_json::Value::Null);
-    assert_eq!(m["verify_ms"],   serde_json::Value::Null);
+    assert_eq!(m["verify_ms"], serde_json::Value::Null);
     assert_eq!(m["prefetch_ms"], serde_json::Value::Null);
     assert_eq!(m["warmed_docs"], serde_json::Value::Null);
 }

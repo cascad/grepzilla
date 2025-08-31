@@ -1,6 +1,8 @@
 // crates/grepzilla_segment/tests/preview_tests.rs
-use grepzilla_segment::common::preview::{build_preview, truncate_chars_with_ellipsis, PreviewOpts};
 use grepzilla_segment::StoredDoc;
+use grepzilla_segment::common::preview::{
+    PreviewOpts, build_preview, truncate_chars_with_ellipsis,
+};
 use std::collections::BTreeMap;
 
 fn doc_with(fields: &[(&str, &str)]) -> StoredDoc {
@@ -32,7 +34,11 @@ fn preview_picks_preferred_and_highlights() {
             highlight_needle: Some("игра"),
         },
     );
-    assert!(out.contains('[') && out.contains(']'), "no highlight: {}", out);
+    assert!(
+        out.contains('[') && out.contains(']'),
+        "no highlight: {}",
+        out
+    );
 }
 
 #[test]
