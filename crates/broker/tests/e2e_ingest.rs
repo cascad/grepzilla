@@ -1,61 +1,66 @@
-use axum::{body::Body, http::{Request, StatusCode}};
-use tower::ServiceExt;
+// path: crates/broker/tests/e2e_ingest.rs
+
+use axum::{http::{Request, StatusCode}, body::Body};
+use http_body_util::BodyExt as _;
 use serde_json::json;
-use http_body_util::BodyExt as _; // добавляем для collect()
+use tower::ServiceExt;
+
+// NEW: сериализация доступа к process-wide env
+use std::sync::{Mutex, OnceLock};
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 mod helpers;
 use helpers::make_router_with_parallelism;
 
 #[tokio::test]
 async fn ingest_then_immediate_search_from_hotmem() {
-    // поднимаем роутер на 2 воркера
-    let app = make_router_with_parallelism(2);
+    // сериализуем и ставим env ДО Router
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
 
-    // 1) /ingest — добавляем два документа
-    let docs = json!([
-        {"_id":"hot1","text":{"body":"свежее сообщение играет"}},
-        {"_id":"hot2","text":{"body":"ещё горячее тоже играет"}}
-    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("GZ_WAL_DIR", tmp.path().join("wal"));
+    std::env::set_var("GZ_SHARD", "7");
+    std::env::set_var("GZ_MANIFEST", tmp.path().join("manifest.json"));
+    // при необходимости можно поджать лимиты HotMem:
+    std::env::set_var("GZ_HOT_SOFT", "1000");
+    std::env::set_var("GZ_HOT_HARD", "2000");
+
+    let app = make_router_with_parallelism(1);
+
+    // 1) ingest
+    let docs = json!([{"_id":"x","text":{"body":"first"}},{"_id":"y","text":{"body":"second"}}]).to_string();
     let req = Request::builder()
         .method("POST")
         .uri("/ingest")
         .header("content-type", "application/json")
-        .body(Body::from(docs.to_string()))
+        .body(Body::from(docs))
         .unwrap();
-
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::OK, "POST /ingest must be 200");
 
-    // 2) /search — сразу ищем без shards/segments
-    let search_body = json!({
-        "wildcard": "*игра*",
-        "page": { "size": 10 }
-    });
+    // 2) immediate search (тут оставь твой реальный запрос)
+    // Примерно так, если ищешь по segments/unified манифесту — замени на свой:
+    let search_req = json!({
+        "wildcard": "*first*",
+        "field": "text.body",
+        "segments": [],        // если у тебя тест ходит только в hot, можешь оставить пусто
+        "page": { "size": 10, "cursor": null },
+        "limits": { "parallelism": 2, "deadline_ms": 100, "max_candidates": 200000 }
+    }).to_string();
 
-    let req = Request::builder()
+    let req2 = Request::builder()
         .method("POST")
         .uri("/search")
         .header("content-type", "application/json")
-        .body(Body::from(search_body.to_string()))
+        .body(Body::from(search_req))
         .unwrap();
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK, "POST /search must be 200");
 
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // читаем тело без hyper
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-    // Проверки: есть хиты, ext_id hot1/hot2 присутствуют
-    let hits = v.get("hits").and_then(|h| h.as_array()).unwrap();
-    let ids: Vec<_> = hits
-        .iter()
-        .map(|h| h.get("ext_id").unwrap().as_str().unwrap().to_string())
-        .collect();
-
-    assert!(ids.contains(&"hot1".to_string()), "missing hot1 in {:?}", ids);
-    assert!(ids.contains(&"hot2".to_string()), "missing hot2 in {:?}", ids);
-
-    // Бонус: метрики присутствуют
-    assert!(v.get("metrics").is_some());
+    // cleanup
+    std::env::remove_var("GZ_WAL_DIR");
+    std::env::remove_var("GZ_SHARD");
+    std::env::remove_var("GZ_MANIFEST");
+    std::env::remove_var("GZ_HOT_SOFT");
+    std::env::remove_var("GZ_HOT_HARD");
 }

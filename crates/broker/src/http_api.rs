@@ -1,9 +1,12 @@
-// crates/broker/src/http_api.rs
+// path: crates/broker/src/http_api.rs
+
 use std::sync::Arc;
 
 use axum::extract::Path;
 use axum::routing::get;
 use axum::{extract::State, routing::post, Json, Router};
+use axum::http::HeaderMap;
+
 use serde::Serialize;
 
 use crate::search::types::{SearchRequest, SearchResponse};
@@ -19,6 +22,7 @@ use crate::manifest::{ManifestFlat, ManifestStore};
 use crate::config::BrokerConfig;
 use crate::ingest::handle_batch_json;
 use crate::ingest::hot::HotMem;
+use crate::ingest::{ApplyResult, Backpressure};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,8 +42,10 @@ pub fn router(state: AppState) -> Router {
     Router::<AppState>::new()
         .route("/healthz", get(healthz))
         .route("/search", post(search))
+        // FIX: сигнатура get_manifest теперь принимает State(AppState),
+        // axum сам инжектит State, маршрут остаётся тем же
         .route("/manifest/:shard", get(get_manifest))
-        .route("/ingest", post(ingest_batch)) // новый эндпоинт
+        .route("/ingest", post(ingest_batch))
         .with_state(state)
 }
 
@@ -51,8 +57,12 @@ pub async fn search(
 
     // shards → resolve через манифест
     if let Some(shards) = req.shards.clone() {
-        let manifest_path =
-            std::env::var("GZ_MANIFEST").unwrap_or_else(|_| "manifest.json".to_string());
+        // FIX: берём путь из конфига
+        let manifest_path = st
+            .cfg
+            .manifest_path
+            .clone()
+            .unwrap_or_else(|| "manifest.json".to_string());
         let store = FsManifestStore { path: manifest_path.into() };
 
         let (seg_refs, pin_map) = store.resolve(&shards).await.map_err(internal)?;
@@ -83,12 +93,16 @@ pub async fn search(
     Ok(Json(resp))
 }
 
+// FIX: берём State(AppState), читаем манифест из st.cfg.manifest_path
 async fn get_manifest(
+    State(st): State<AppState>,
     Path(shard): Path<u64>,
 ) -> Result<Json<ManifestShardOut>, (axum::http::StatusCode, String)> {
-    // путь к манифесту: env или ./manifest.json
-    let manifest_path =
-        std::env::var("GZ_MANIFEST").unwrap_or_else(|_| "manifest.json".to_string());
+    let manifest_path = st
+        .cfg
+        .manifest_path
+        .clone()
+        .unwrap_or_else(|| "manifest.json".to_string());
     let store = FsManifestStore { path: manifest_path.clone().into() };
 
     // 1) пробуем unified-загрузчик (если файл в v1/unified)
@@ -101,15 +115,19 @@ async fn get_manifest(
     }
 
     // 2) flat-фолбэк: читаем как плоский формат
-    let data = tokio::fs::read(&manifest_path).await.map_err(internal)?;
+    let data = match tokio::fs::read(&manifest_path).await {
+        Ok(d) => d,
+        Err(_) => {
+            return Err((axum::http::StatusCode::NOT_FOUND, format!("shard {shard} not found")));
+        }
+    };
     // если файл пустой/плохой — отдаём 404
-    let flat: crate::manifest::ManifestFlat =
-        match serde_json::from_slice(&data) {
-            Ok(v) => v,
-            Err(_) => {
-                return Err((axum::http::StatusCode::NOT_FOUND, format!("shard {shard} not found")))
-            }
-        };
+    let flat: crate::manifest::ManifestFlat = match serde_json::from_slice(&data) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err((axum::http::StatusCode::NOT_FOUND, format!("shard {shard} not found")));
+        }
+    };
 
     // сначала пытаемся взять generation из flat.shards
     if let Some(&gen) = flat.shards.get(&shard) {
@@ -121,7 +139,6 @@ async fn get_manifest(
     // если в shards нет — выведем max(gen) из ключей segments "shard:gen"
     let mut max_gen: Option<u64> = None;
     for k in flat.segments.keys() {
-        // ожидаем формат "<shard>:<gen>"
         if let Some((lh, rh)) = k.split_once(':') {
             if let (Ok(s), Ok(g)) = (lh.parse::<u64>(), rh.parse::<u64>()) {
                 if s == shard {
@@ -141,51 +158,109 @@ async fn get_manifest(
     Err((axum::http::StatusCode::NOT_FOUND, format!("shard {shard} not found")))
 }
 
-
-/// Принимает JSON-док(и), пишет WAL→сегмент и (если задан GZ_MANIFEST) публикует в манифест.
+/// POST /ingest
 pub async fn ingest_batch(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    // Разворачиваем тело: либо массив, либо единичный объект
+) -> impl axum::response::IntoResponse {
     let records_vec: Vec<Value> = match body {
         Value::Array(arr) => arr,
         other => vec![other],
     };
 
-    // 0) горячая память — мгновенная видимость
-    let added = st.hot.push_raw_json(records_vec.clone());
+    let idempotency_key = headers
+        .get("Idempotency-Key")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
 
-    // 1) WAL → segment
-    let out = handle_batch_json(records_vec, &st.cfg).await.map_err(internal)?;
-    let seg_path = out
-        .get("segment")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    // 0) Горячая память — мгновенная видимость (с учётом идемпотентности/лимитов)
+    let applied: ApplyResult = match st.hot.apply(records_vec.clone(), idempotency_key) {
+        Ok(a) => a,
+        Err(Backpressure { retry_after_ms }) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "ok": false,
+                    "hot_added": 0,
+                    "idempotent": false,
+                    "backlog_ms": retry_after_ms
+                })),
+            );
+        }
+    };
 
-    // 2) Публикация в манифест: НЕ роняем 500 при ошибке — просто добавим поле manifest_error
+    // Если чистый повтор — не пишем на диск и не публикуем сегмент
+    if applied.idempotent {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "hot_added": 0,
+                "idempotent": true
+            })),
+        );
+    }
+
+    // 1) WAL → segment (нефатальные ошибки после HotMem)
+    let mut seg_path: Option<String> = None;
+    let mut segment_error: Option<String> = None;
+    let out = match handle_batch_json(records_vec, &st.cfg).await {
+        Ok(v) => {
+            seg_path = v
+                .get("segment")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            v
+        }
+        Err(e) => {
+            tracing::error!("ingest: handle_batch_json failed: {e}");
+            segment_error = Some(e.to_string());
+            json!({ "ok": true })
+        }
+    };
+
+    // 2) Публикация в манифест (через cfg, без env)
     let mut manifest_error: Option<String> = None;
-    if let Ok(manifest_path) = std::env::var("GZ_MANIFEST") {
-        let shard: u64 = std::env::var("GZ_SHARD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let store = FsManifestStore { path: manifest_path.into() };
-        if let Err(e) = store.append_segment(shard, seg_path).await {
-            // логируем и продолжаем
-            tracing::warn!(%e, "append_segment failed");
-            manifest_error = Some(e.to_string());
+    if let (Some(manifest_path), Some(seg)) = (st.cfg.manifest_path.clone(), seg_path.clone()) {
+        let shard: u64 = st.cfg.shard;
+        let store = FsManifestStore { path: manifest_path.clone().into() };
+        if let Some(parent) = std::path::Path::new(&manifest_path).parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        match store.append_segment(shard, seg.clone()).await {
+            Ok(_) => {}
+            Err(e) => {
+                let exists = tokio::fs::try_exists(&manifest_path).await.unwrap_or(false);
+                if !exists {
+                    let _ = tokio::fs::write(&manifest_path, b"{}").await;
+                    if let Err(e2) = store.append_segment(shard, seg).await {
+                        tracing::warn!(%e2, "append_segment failed after init");
+                        manifest_error = Some(e2.to_string());
+                    }
+                } else {
+                    tracing::warn!(%e, "append_segment failed");
+                    manifest_error = Some(e.to_string());
+                }
+            }
         }
     }
 
-    // 3) ответ (+ hot_added, + manifest_error при наличии)
+    // 3) Ответ
     let mut out_obj = out.as_object().cloned().unwrap_or_default();
-    out_obj.insert("hot_added".into(), serde_json::json!(added));
-    if let Some(err) = manifest_error {
-        out_obj.insert("manifest_error".into(), serde_json::json!(err));
+    out_obj.insert("hot_added".into(), json!(applied.added));
+    out_obj.insert("idempotent".into(), json!(false));
+    if let Some(ms) = applied.backlog_ms {
+        out_obj.insert("backlog_ms".into(), json!(ms));
     }
-    Ok(Json(serde_json::Value::Object(out_obj)))
+    if let Some(err) = segment_error {
+        out_obj.insert("segment_error".into(), json!(err));
+    }
+    if let Some(err) = manifest_error {
+        out_obj.insert("manifest_error".into(), json!(err));
+    }
+
+    (axum::http::StatusCode::OK, Json(serde_json::Value::Object(out_obj)))
 }
 
 fn internal<E: ToString>(e: E) -> (axum::http::StatusCode, String) {

@@ -1,17 +1,32 @@
-// crates/broker/tests/e2e_ingest_cap.rs
-use axum::{body::Body, http::{Request, StatusCode}};
-use tower::ServiceExt;
-use serde_json::json;
+// path: crates/broker/tests/e2e_ingest_cap.rs
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use http_body_util::BodyExt as _;
+use serde_json::json;
+use tower::ServiceExt;
 
 mod helpers;
-// было: use helpers::make_router_with_parallelism;
-use helpers::make_router_with_parallelism_and_cap;
+use helpers::make_router_with_config;
+
+use broker::config::BrokerConfig;
 
 #[tokio::test]
 async fn hotmem_respects_cap() {
-    // cap = 3, чтобы "1","2" выкинулись
-    let app = make_router_with_parallelism_and_cap(1, 3);
+    // собираем изолированный конфиг без env
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = BrokerConfig {
+        addr: "127.0.0.1:0".into(),
+        wal_dir: tmp.path().join("wal").to_string_lossy().to_string(),
+        segment_out_dir: tmp.path().join("segments").to_string_lossy().to_string(),
+        parallelism: 1,
+        hot_cap: 3, // cap = 3, чтобы "1","2" выкинулись
+        manifest_path: None,
+        shard: 0,
+    };
+
+    let app = make_router_with_config(cfg);
 
     // 1) ingest 5 документов
     let docs = json!([
@@ -21,29 +36,43 @@ async fn hotmem_respects_cap() {
       {"_id":"4","text":{"body":"doc4 играет"}},
       {"_id":"5","text":{"body":"doc5 играет"}}
     ]);
-    let req = Request::builder().method("POST").uri("/ingest")
-      .header("content-type","application/json")
-      .body(Body::from(docs.to_string())).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ingest")
+        .header("content-type", "application/json")
+        .body(Body::from(docs.to_string()))
+        .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 2) search
-    let body = json!({"wildcard":"*игра*","page":{"size":10}});
-    let req = Request::builder().method("POST").uri("/search")
-      .header("content-type","application/json")
-      .body(Body::from(body.to_string())).unwrap();
+    // 2) search по нужному полю (важно указать field)
+    let body = json!({
+        "wildcard":"*игра*",
+        "field":"text.body",
+        "page":{"size":10}
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/search")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let ids: Vec<String> = v["hits"].as_array().unwrap()
-      .iter().map(|h| h["ext_id"].as_str().unwrap().to_string()).collect();
+    let ids: Vec<String> = v["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["ext_id"].as_str().unwrap().to_string())
+        .collect();
 
-    // теперь должны отсутствовать "1" и "2"
+    // теперь должны отсутствовать "1" и "2", а "3","4","5" быть
     assert!(!ids.contains(&"1".to_string()), "unexpected 1 in {:?}", ids);
     assert!(!ids.contains(&"2".to_string()), "unexpected 2 in {:?}", ids);
-    assert!(ids.iter().any(|x| x=="3"));
-    assert!(ids.iter().any(|x| x=="4"));
-    assert!(ids.iter().any(|x| x=="5"));
+    assert!(ids.iter().any(|x| x == "3"), "expected 3 in {:?}", ids);
+    assert!(ids.iter().any(|x| x == "4"), "expected 4 in {:?}", ids);
+    assert!(ids.iter().any(|x| x == "5"), "expected 5 in {:?}", ids);
 }

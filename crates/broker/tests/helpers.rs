@@ -1,57 +1,36 @@
-// crates/broker/tests/helpers.rs
-use std::sync::Arc;
+// path: crates/broker/tests/helpers.rs
 use axum::Router;
+use broker::config::BrokerConfig;
+use broker::http_api::{router, AppState};
+use broker::ingest::hot::HotMem;
+use broker::search::SearchCoordinator;
+use std::sync::Arc;
 
-pub fn test_cfg(tmp: &tempfile::TempDir, parallelism: usize) -> broker::config::BrokerConfig {
-    broker::config::BrokerConfig {
-        addr: "127.0.0.1:0".to_string(),
-        wal_dir: tmp.path().join("wal").to_string_lossy().into(),
-        segment_out_dir: tmp.path().join("segments").to_string_lossy().into(),
-        parallelism,
-        hot_cap: 1000, // дефолт для старых тестов
-    }
-}
+pub fn make_router_with_config(cfg: BrokerConfig) -> Router {
+    // создаём HotMem с нужной ёмкостью
+    let hot = HotMem::new().with_cap(cfg.hot_cap);
 
-// NEW: конфиг с явным cap
-pub fn test_cfg_with_cap(
-    tmp: &tempfile::TempDir,
-    parallelism: usize,
-    hot_cap: usize,
-) -> broker::config::BrokerConfig {
-    broker::config::BrokerConfig {
-        addr: "127.0.0.1:0".to_string(),
-        wal_dir: tmp.path().join("wal").to_string_lossy().into(),
-        segment_out_dir: tmp.path().join("segments").to_string_lossy().into(),
-        parallelism,
-        hot_cap,
-    }
+    // ВАЖНО: прокинуть hot в координатор поиска,
+    // чтобы /search видел документы, которые мы только что залили через /ingest
+    let coord = Arc::new(
+        SearchCoordinator::new(cfg.parallelism)
+            .with_hot(hot.clone())
+    );
+
+    let state = AppState { coord, cfg, hot };
+    router(state)
 }
 
 pub fn make_router_with_parallelism(parallelism: usize) -> Router {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("wal")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
-    let cfg = test_cfg(&tmp, parallelism);
-
-    let hot = broker::ingest::hot::HotMem::new().with_cap(cfg.hot_cap);
-    let coord = Arc::new(broker::search::SearchCoordinator::new(parallelism).with_hot(hot.clone()));
-
-    let app = broker::http_api::router(broker::http_api::AppState { coord, cfg, hot });
-    std::mem::forget(tmp);
-    app
+    let mut cfg = BrokerConfig::from_env();
+    cfg.parallelism = parallelism;
+    make_router_with_config(cfg)
 }
 
-// NEW: роутер с явным cap
-pub fn make_router_with_parallelism_and_cap(parallelism: usize, hot_cap: usize) -> Router {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("wal")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("segments")).unwrap();
-    let cfg = test_cfg_with_cap(&tmp, parallelism, hot_cap);
-
-    let hot = broker::ingest::hot::HotMem::new().with_cap(cfg.hot_cap);
-    let coord = Arc::new(broker::search::SearchCoordinator::new(parallelism).with_hot(hot.clone()));
-
-    let app = broker::http_api::router(broker::http_api::AppState { coord, cfg, hot });
-    std::mem::forget(tmp);
-    app
+// Удобный хелпер для тестов cap’а
+pub fn make_router_with_parallelism_and_cap(parallelism: usize, cap: usize) -> Router {
+    let mut cfg = BrokerConfig::from_env();
+    cfg.parallelism = parallelism;
+    cfg.hot_cap = cap;
+    make_router_with_config(cfg)
 }

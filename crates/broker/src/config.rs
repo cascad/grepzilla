@@ -1,3 +1,4 @@
+// path: crates/broker/src/config.rs
 use serde::Deserialize;
 
 #[derive(Clone, Deserialize)]
@@ -8,7 +9,13 @@ pub struct BrokerConfig {
     #[serde(default = "default_parallelism")]
     pub parallelism: usize,
     #[serde(default = "default_hot_cap")]
-    pub hot_cap: usize, // NEW
+    pub hot_cap: usize,
+
+    // NEW: переносим то, что раньше читали из env на лету
+    #[serde(default)]
+    pub manifest_path: Option<String>, // путь к manifest.json (файл, не папка)
+    #[serde(default)]
+    pub shard: u64,                    // текущий shard брокера
 }
 
 fn default_parallelism() -> usize { 4 }
@@ -22,6 +29,10 @@ impl BrokerConfig {
         let parallelism = std::env::var("GZ_PARALLELISM").ok().and_then(|s| s.parse().ok()).unwrap_or(default_parallelism());
         let hot_cap = std::env::var("GZ_HOT_CAP").ok().and_then(|s| s.parse().ok()).unwrap_or(default_hot_cap());
 
-        Self { addr, wal_dir, segment_out_dir, parallelism, hot_cap }
+        // NEW:
+        let manifest_path = std::env::var("GZ_MANIFEST").ok();
+        let shard = std::env::var("GZ_SHARD").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        Self { addr, wal_dir, segment_out_dir, parallelism, hot_cap, manifest_path, shard }
     }
 }

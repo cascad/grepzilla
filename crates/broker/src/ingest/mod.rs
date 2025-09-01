@@ -1,4 +1,4 @@
-// crates/broker/src/ingest/mod.rs
+// path: crates/broker/src/ingest/mod.rs
 pub mod compactor;
 pub mod wal;
 pub mod memtable;
@@ -23,3 +23,6 @@ pub async fn handle_batch_json(
         "ok": true, "appended": appended, "wal": wal_path, "segment": seg_path
     }))
 }
+
+// NEW: реэкспорт, чтобы http_api видел типы
+pub use hot::{ApplyResult, Backpressure};

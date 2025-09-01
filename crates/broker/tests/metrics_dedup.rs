@@ -1,7 +1,7 @@
 // crates/broker/tests/metrics_dedup.rs
 use broker::search::executor::SegmentTaskOutput;
 use broker::search::paginator::Paginator;
-use broker::search::types::{Hit, SearchCursor, SearchMetrics, SearchResponse};
+use broker::search::types::{Hit, SearchMetrics, SearchResponse};
 
 fn mk_seg(
     seg_path: &str,

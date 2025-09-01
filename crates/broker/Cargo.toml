@@ -18,6 +18,8 @@ futures = "0.3"
 regex = "1.10"
 async-trait = "0.1"
 tower="0.4"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+crc32fast = "1.4"
 
 grepzilla_segment = { path = "../grepzilla_segment" }
 
@@ -29,6 +31,9 @@ serde_json = "1.0"
 tower = {version = "0.4", features = ["util"]}
 tempfile = "3"
 http-body-util = "0.1"
+
+# todo rm that
+parking_lot = "0.12.4"
 
 [[bench]]
 name = "search_bench"
